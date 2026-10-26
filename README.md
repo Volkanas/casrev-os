@@ -10,11 +10,15 @@ Her aşama çalışır durumda bırakılır: derle, QEMU'da aç, sonucu gör.
 
 ![casrev-os v0.9 16-bit masaüstü](docs/stage10.png)
 
-![Yerel Arama uygulaması](docs/arama.png)
+![Arama: yerel sonuçlar](docs/arama.png)
+
+![Arama: yerel + internet sonuçları](docs/arama-online.png)
 
 ## Hızlı başlangıç
 
 **`BASLAT.bat`** dosyasına çift tıklayın. Proje derlenir ve QEMU penceresi açılır.
+QEMU açılırken host arama köprüsü de otomatik başlar; internet varsa arama
+sonuçlarına web satırları eklenir.
 
 Kapatmak için QEMU penceresini kapatmanız yeterli.
 
@@ -25,6 +29,7 @@ Kapatmak için QEMU penceresini kapatmanız yeterli.
 | NASM | `winget install NASM.NASM` |
 | QEMU | `winget install SoftwareFreedomConservancy.QEMU` |
 | LLVM (clang + lld) | `winget install LLVM.LLVM` |
+| Python 3 | `winget install Python.Python.3.12` (internet araması için isteğe bağlı) |
 | PowerShell | Windows ile gelir |
 
 ## Komut satırından
@@ -41,6 +46,12 @@ Pencere açmadan (seri çıktı konsola gelir):
 powershell -ExecutionPolicy Bypass -File scripts/run.ps1 -NoDisplay
 ```
 
+İnternet köprüsü olmadan, yalnızca yerel aramayla çalıştırma:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run.ps1 -NoInternet
+```
+
 Testler:
 
 ```powershell
@@ -49,16 +60,39 @@ powershell -ExecutionPolicy Bypass -File scripts/test-shell.ps1     # klavye + f
 powershell -ExecutionPolicy Bypass -File scripts/test-gui.ps1       # masaüstü + Not Defteri
 powershell -ExecutionPolicy Bypass -File scripts/test-settings.ps1  # Ayarlar + pencere yönetimi + Türkçe tuşlar
 powershell -ExecutionPolicy Bypass -File scripts/test-search.ps1    # yerel Arama: dosya, uygulama, komut
+powershell -ExecutionPolicy Bypass -File scripts/test-search-online.ps1  # gerçek internet + web detay kartı
 ```
 
-`test-shell.ps1`, `test-settings.ps1` ve `test-search.ps1` QEMU monitor üzerinden
-gerçek tuş basışları ve fare hareketleri gönderir. `test-settings.ps1` ayrıca
-duvar kağıdı değiştirme, büyütme/geri yükleme, küçültme, görev çubuğundan geri
-açma, sekiz uygulama açıkken görev çubuğu yerleşimi, Başlat menüsü hover'ı ve
-Türkçe karakter yazımını ekran görüntüleriyle doğrular
-(`build/settings-*.png`). `test-search.ps1`, RamFS dosyası (`gorevler.txt`),
-uygulama (Ayarlar) ve kabuk komutu (`help`) sonuçlarını açıp ekran görüntüleriyle
-kaydeder (`build/search-*.png`).
+`test-shell.ps1`, `test-settings.ps1`, `test-search.ps1` ve
+`test-search-online.ps1` QEMU monitor üzerinden gerçek tuş basışları ve fare
+hareketleri gönderir. `test-settings.ps1` ayrıca duvar kağıdı değiştirme,
+büyütme/geri yükleme, küçültme, görev çubuğundan geri açma, sekiz uygulama
+açıkken görev çubuğu yerleşimi, Başlat menüsü hover'ı ve Türkçe karakter
+yazımını ekran görüntüleriyle doğrular (`build/settings-*.png`).
+`test-search.ps1`, RamFS dosyası (`gorevler.txt`), uygulama (Ayarlar) ve kabuk
+komutu (`help`) sonuçlarını açıp ekran görüntüleriyle kaydeder
+(`build/search-*.png`). `test-search-online.ps1` Python ajanını başlatır,
+QEMU'ya COM2 olarak bağlar, `Linux` sorgusunu DuckDuckGo üzerinden arar ve
+web sonucu ile `WEB SONUCU` detay kartını doğrular; ardından `ayar` sorgusuyla
+üç yerel + iki web satırını aynı listede gösterip birleşik görünümü
+`build/search-online-*.png` görüntüleriyle kaydeder.
+
+### İnternet araması
+
+`scripts/run.ps1` varsayılan olarak `scripts/search-agent.py` ajanını gizli
+pencerede başlatır ve QEMU'ya `127.0.0.1:5568` üzerinden ikinci seri portu
+(COM2) ekler. Arama penceresine örneğin `Linux` yazdığınızda yerel sonuçların
+altında mavi `W` ikonlu web satırları görünür; birine tıklamak başlık, site,
+URL ve özet içeren `WEB SONUCU` kartını açar.
+
+- Python 3 yoksa veya internet erişimi yoksa yerel arama çalışmaya devam eder.
+- `-NoInternet` anahtarı ajanı ve COM2'yi tamamen kapatır.
+- Ajan DuckDuckGo HTML arayüzünü, yedek olarak Wikipedia API'sini kullanır;
+  hesap, API anahtarı ve çerez istemez.
+- Ajan günlükleri `build/search-agent.log` ve
+  `build/search-agent.err.log` dosyalarındadır.
+- Web sayfası içeriği bu sürümde çizilmez; yalnızca arama sonucu özeti
+  gösterilir. Native NIC/TCP/TLS yığını yol haritasındadır.
 
 ## Modern Masaüstü ve Uygulamalar (v0.9, 16-bit)
 
@@ -80,7 +114,7 @@ kaydeder (`build/search-*.png`).
   - Açık pencereler için dinamik genişlikte sekmeler; tıklayınca küçült/geri aç.
   - Sistem tepsisi: canlı PMM RAM kullanımı (`RAM: X/31M`), fare koordinatları ve RTC saati.
 - **Başlat menüsü:** Yarı saydam koyu panel, hover vurgulu dokuz uygulama, yeniden başlat ve kapat.
-- **Yerel Arama:** Google görünümlü, tamamen çevrimdışı arama penceresi; RamFS dosyalarını, uygulamaları ve kabuk komutlarını tarar.
+- **Arama (yerel + internet):** Google görünümlü arama penceresi; RamFS dosyalarını, uygulamaları ve kabuk komutlarını tarar. İnternet varsa DuckDuckGo sonuçları aynı listede web satırları olarak görünür; bağlantı yoksa yerel arama çalışmaya devam eder.
 - **Dört duvar kağıdı:** 16-bit gradyanlı yıldızlı gece silueti, okyanus, gün batımı ve sade klasik tema.
 - **Sanal Dosya Sistemi (RamFS):** Bellek içi klasör/dosya hiyerarşisi; Dosya Gezgini ve Not Defteri ile düzenlenebilir.
 
@@ -96,7 +130,7 @@ kaydeder (`build/search-*.png`).
 5. **Mayın Tarlası:** 9×9 ızgara, 10 mayın, sayaç, gülen yüz sıfırlama, sol tıkla açma, sağ tıkla bayrak.
 6. **Hesap Makinesi:** Tıklanabilir butonlar ve klavye desteği, LCD ekran.
 7. **Sistem Bilgisi:** CPU tick, çalışma süresi, donanım durumları ve canlı RAM doluluk çubuğu.
-8. **Arama (Yerel):** Google'a benzeyen sade arayüz; yazarken RamFS dosya adı/yolu/içeriği, uygulamalar ve kabuk komutları arasında anında arama. Dosya sonucu Not Defterinde, uygulama sonucu ilgili pencerede, komut sonucu Terminalde açılır. İnternet bağlantısı gerektirmez.
+8. **Arama (Yerel + İnternet):** Google'a benzeyen sade arayüz; yazarken RamFS dosya adı/yolu/içeriği, uygulamalar ve kabuk komutları arasında anında arama. İnternet köprüsü açıksa DuckDuckGo'dan en fazla iki web sonucu aynı listeye eklenir. Dosya sonucu Not Defterinde, uygulama sonucu ilgili pencerede, komut sonucu Terminalde açılır; web sonucu başlık, site, URL ve özet içeren `WEB SONUCU` kartını gösterir. Sayfa içeriği bu sürümde görüntülenmez; bağlantı yoksa yerel arama bozulmadan çalışır.
 9. **Ayarlar:** Duvar kağıdı seçimi, klavye bilgisi, kısayollar ve canlı sistem durumu.
 
 ## Türkçe-Q klavye
@@ -142,7 +176,7 @@ Windows-1254 kodlarıyla üretilir ve 8×8 özel gliflerle çizilir.
 | `calc` | Hesap Makinesi penceresini açar |
 | `sysinfo` | Sistem Bilgisi penceresini açar |
 | `settings`, `ayarlar` | Ayarlar penceresini açar |
-| `search [sorgu]`, `arama` | Yerel arama penceresini açar; sorgu verilirse sonuçları hazırlar |
+| `search [sorgu]`, `arama` | Arama penceresini açar; sorgu verilirse yerel ve internet sonuçlarını hazırlar |
 | `launcher` | Başlat menüsünü açar/kapatır (ESC) |
 | `uptime` | Çalışma süresi ve tick sayısı |
 | `echo ...` | Metni ekrana yazar |
@@ -167,6 +201,7 @@ Windows-1254 kodlarıyla üretilir ve 8×8 özel gliflerle çizilir.
 - [x] **Aşama 8** — Sanal Dosya Sistemi (RamFS), Dosya Gezgini, Not Defteri, Paint, Mayın Tarlası
 - [x] **Aşama 8.5 (v0.9)** — Tam Türkçe-Q klavye, Ayarlar uygulaması, dört duvar kağıdı, 16-bit RGB565 görsel paket, büyütme/geri yükleme
 - [x] **Aşama 8.6** — Google görünümlü yerel Arama: RamFS dosyaları, uygulamalar ve kabuk komutları arasında çevrimdışı arama
+- [x] **Aşama 8.7** — COM2 host köprüsüyle anonim internet araması: DuckDuckGo + Wikipedia, birleşik yerel/web sonuç listesi ve web detay kartı
 - [ ] **Aşama 9** — Kalıcı dosya sistemi (ATA/FAT12), dosyaların yeniden başlatmada korunması
 - [ ] **Aşama 10** — Süreçler, görev değiştirme, sistem çağrıları
 - [ ] **Aşama 11** — Daha fazla uygulama, kararlılık ve performans çalışmaları
@@ -178,7 +213,8 @@ casrev-os/
 ├── BASLAT.bat               # çift tıkla: derle + QEMU
 ├── docs/
 │   ├── stage10.png          # v0.9 16-bit masaüstü ekran görüntüsü
-│   └── arama.png            # yerel Arama uygulaması ekran görüntüsü
+│   ├── arama.png            # Arama uygulaması ekran görüntüsü
+│   └── arama-online.png     # internet sonuçları ekran görüntüsü
 ├── src/
 │   ├── boot/
 │   │   ├── boot.asm         # boot sector
@@ -201,7 +237,7 @@ casrev-os/
 │       ├── heap.c/.h        # kmalloc/kfree (256 KB)
 │       ├── vfs.c/.h         # RamFS: düğümler, dosyalar, klasörler
 │       ├── vga.c/.h         # grafik terminal üzerinden eski VGA API'si
-│       ├── serial.c/.h      # COM1 115200 8N1
+│       ├── serial.c/.h      # COM1 log + COM2 host köprüsü, 115200 8N1
 │       ├── console.c/.h     # VGA + seri ortak çıktı, kprintf
 │       ├── string.c/.h      # memcpy/memset/strlen...
 │       ├── io.h             # inb/outb
@@ -210,11 +246,13 @@ casrev-os/
 ├── scripts/
 │   ├── build.ps1
 │   ├── run.ps1
+│   ├── search-agent.py      # host tarafı anonim arama köprüsü (Python 3)
 │   ├── test.ps1
 │   ├── test-shell.ps1
 │   ├── test-gui.ps1
 │   ├── test-settings.ps1
-│   └── test-search.ps1
+│   ├── test-search.ps1
+│   └── test-search-online.ps1
 ├── build/                   # üretilen dosyalar (git'e girmez)
 └── README.md
 ```
@@ -272,7 +310,19 @@ casrev-os/
   sonra RamFS ağacını (dosya adı, tam yol ve içerik), sonra kabuk komutlarını
   tarar. Türkçe karakterler `search_fold()` ile ASCII'ye katlanır; büyük/küçük
   harf duyarsızdır. En fazla beş sonuç gösterilir, dosya eşleşmelerinde içerikten
-  tek satırlık bağlam özeti çıkarılır. Ağ katmanı yoktur; tamamen çevrimdışıdır.
+  tek satırlık bağlam özeti çıkarılır. Yerel aramanın kendisi ağ katmanı
+  kullanmaz; internet araması ayrı COM2 köprüsüyle yapılır.
+- **İnternet araması:** Misafir NIC/TCP/TLS taşımaz. `serial.c` içindeki COM2
+  sürücüsü (0x2F8, 115200 8N1) sorguyu `Q\t<id>\t<sorgu>` satırı olarak host'a
+  gönderir. `scripts/search-agent.py` bu satırı QEMU'nun
+  `tcp:127.0.0.1:5568` seri soketinden okur, DuckDuckGo HTML arayüzünde
+  (yedek: Wikipedia API) arar ve `R`/`T`/`END` satırlarıyla en fazla iki sonuç
+  döndürür. Ajan sonuçları CP1254'e dönüştürür, sekmeleri temizler ve alanları
+  sınırlar. Yerel sonuçlar korunur; internet yoksa/gecikirse yalnızca yerel
+  liste gösterilir. Web sonucuna tıklamak sayfa açmaz; başlık, site, URL ve
+  özetten oluşan `WEB SONUCU` kartını açar.
+- **Gizlilik:** Ajan hesap, API anahtarı ve çerez kullanmaz; yalnızca sorguyu
+  DuckDuckGo/Wikipedia'ya iletir. COM2 bağlantısı `127.0.0.1` üzerindedir.
 - Test çıktısı hem grafik terminale hem COM1'e yazılır; test betikleri QEMU
   `sendkey`, `mouse_move` ve `mouse_button` ile gerçek girişleri gönderip
   sonucu seri porttan ve ekran görüntülerinden doğrular.

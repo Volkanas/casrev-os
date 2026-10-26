@@ -4,3 +4,5 @@ build/
 *.bin
 *.o
 *.elf
+__pycache__/
+*.pyc

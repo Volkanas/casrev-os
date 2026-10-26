@@ -9,6 +9,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "rtc.h"
+#include "serial.h"
 #include "string.h"
 #include "timer.h"
 #include "types.h"
@@ -445,10 +446,12 @@ void ui_term_putc(char c)
 /* ========================================================================= */
 #define SEARCH_QUERY_MAX   40
 #define SEARCH_MAX_RESULTS 5
-#define SEARCH_TITLE_MAX   40
+#define SEARCH_MAX_LOCAL   5
+#define SEARCH_MAX_NET     5
+#define SEARCH_TITLE_MAX   80
 #define SEARCH_META_MAX    72
-#define SEARCH_DETAIL_MAX  64
-#define SEARCH_PATH_MAX    96
+#define SEARCH_DETAIL_MAX  140
+#define SEARCH_PATH_MAX    160
 
 #define SEARCH_PAD         24
 #define SEARCH_FIELD_TOP   72
@@ -460,6 +463,17 @@ void ui_term_putc(char c)
 #define SEARCH_TYPE_FILE 1
 #define SEARCH_TYPE_APP  2
 #define SEARCH_TYPE_CMD  3
+#define SEARCH_TYPE_NET  4
+
+#define SEARCH_NET_OFF     0
+#define SEARCH_NET_IDLE    1
+#define SEARCH_NET_PENDING 2
+#define SEARCH_NET_WAITING 3
+#define SEARCH_NET_READY   4
+#define SEARCH_NET_ERROR   5
+
+#define SEARCH_NET_LINE_MAX 512
+#define SEARCH_NET_TIMEOUT  800   /* 8 saniye (100 Hz) */
 
 typedef struct {
     int type;
@@ -513,8 +527,8 @@ static const search_cmd_t search_commands[] = {
     { "sysinfo",  "Sistem Bilgisi penceresini acar" },
     { "settings", "Ayarlar penceresini acar" },
     { "ayarlar",  "Ayarlar penceresini acar" },
-    { "search",   "Yerel arama penceresini acar" },
-    { "arama",    "Yerel arama penceresini acar" },
+    { "search",   "Arama penceresini acar (yerel + internet)" },
+    { "arama",    "Arama penceresini acar (yerel + internet)" },
     { "launcher", "Baslat menusunu acar veya kapatir" },
     { "uptime",   "Calisma suresini gosterir" },
     { "mem",      "Bellek istatistiklerini gosterir" },
@@ -529,9 +543,26 @@ static const search_cmd_t search_commands[] = {
 
 static char search_query[SEARCH_QUERY_MAX + 1];
 static int  search_query_len;
+
+/* Yerel sonuclar, internet sonuclari ve ekranda birlestirilmis liste. */
+static search_result_t search_local_results[SEARCH_MAX_LOCAL];
+static int  search_local_count;
+static int  search_local_total;
+static search_result_t search_net_results[SEARCH_MAX_NET];
+static int  search_net_count;
+static int  search_net_total;
 static search_result_t search_results[SEARCH_MAX_RESULTS];
 static int  search_result_count;
 static int  search_total;
+
+static int      search_net_state = SEARCH_NET_OFF;
+static int      search_net_seq;
+static int      search_net_resp_id = -1;
+static uint32_t search_net_send_tick;
+static uint32_t search_net_wait_start;
+static char     search_net_line[SEARCH_NET_LINE_MAX];
+static int      search_net_line_len;
+static int      search_detail = -1;
 
 static void search_copy(char *dst, const char *src, int max)
 {
@@ -627,14 +658,19 @@ static void search_snippet(const char *content, const char *hit,
     out[pos] = '\0';
 }
 
-static void search_add(int type, const char *icon, uint8_t color,
-                       const char *title, const char *meta,
-                       const char *detail, const char *path, int action)
+static void search_copy_result(search_result_t *dst, const search_result_t *src)
 {
-    search_total++;
-    if (search_result_count >= SEARCH_MAX_RESULTS) return;
+    *dst = *src;
+}
 
-    search_result_t *r = &search_results[search_result_count++];
+static void search_add_local(int type, const char *icon, uint8_t color,
+                             const char *title, const char *meta,
+                             const char *detail, const char *path, int action)
+{
+    search_local_total++;
+    if (search_local_count >= SEARCH_MAX_LOCAL) return;
+
+    search_result_t *r = &search_local_results[search_local_count++];
     r->type = type;
     r->action = action;
     r->icon_color = color;
@@ -643,6 +679,54 @@ static void search_add(int type, const char *icon, uint8_t color,
     search_copy(r->meta, meta, sizeof(r->meta));
     search_copy(r->detail, detail, sizeof(r->detail));
     search_copy(r->path, path, sizeof(r->path));
+}
+
+static void search_add_net(const char *title, const char *site,
+                           const char *url, const char *detail)
+{
+    if (search_net_count >= SEARCH_MAX_NET) return;
+
+    search_result_t *r = &search_net_results[search_net_count++];
+    r->type = SEARCH_TYPE_NET;
+    r->action = -1;
+    r->icon_color = VGA_LIGHT_BLUE;
+    search_copy(r->icon, "W", sizeof(r->icon));
+    search_copy(r->title, title, sizeof(r->title));
+
+    char meta[SEARCH_META_MAX];
+    string_format(meta, sizeof(meta), "Internet | %s", site ? site : "web");
+    search_copy(r->meta, meta, sizeof(r->meta));
+    search_copy(r->detail, detail, sizeof(r->detail));
+    search_copy(r->path, url, sizeof(r->path));
+}
+
+/* Yerel ve internet sonuclarini en fazla 5 satirda birlestirir. */
+static void search_merge_results(void)
+{
+    search_result_count = 0;
+
+    int local_limit = SEARCH_MAX_RESULTS;
+    if (search_net_state == SEARCH_NET_READY && search_net_count > 0) {
+        local_limit = 3;   /* internet sonuclarina yer ac */
+    }
+    if (local_limit > search_local_count) local_limit = search_local_count;
+
+    for (int i = 0; i < local_limit && search_result_count < SEARCH_MAX_RESULTS; i++) {
+        search_copy_result(&search_results[search_result_count++],
+                           &search_local_results[i]);
+    }
+
+    if (search_net_state == SEARCH_NET_READY) {
+        for (int i = 0; i < search_net_count && search_result_count < SEARCH_MAX_RESULTS; i++) {
+            search_copy_result(&search_results[search_result_count++],
+                               &search_net_results[i]);
+        }
+    }
+
+    search_total = search_local_total;
+    if (search_net_state == SEARCH_NET_READY) {
+        search_total += search_net_total;
+    }
 }
 
 static void search_scan_dir(vfs_node_t *dir, const char *query)
@@ -678,23 +762,168 @@ static void search_scan_dir(vfs_node_t *dir, const char *query)
             search_copy(detail, "RamFS dosyasi", sizeof(detail));
         }
 
-        search_add(SEARCH_TYPE_FILE, "D", VGA_LIGHT_CYAN, node->name,
-                   meta, detail, path, -1);
+        search_add_local(SEARCH_TYPE_FILE, "D", VGA_LIGHT_CYAN, node->name,
+                         meta, detail, path, -1);
+    }
+}
+
+static int search_net_parse_int(const char *s)
+{
+    int sign = 1;
+    int value = 0;
+
+    if (!s) return 0;
+    while (*s == ' ') s++;
+    if (*s == '-') { sign = -1; s++; }
+    while (*s >= '0' && *s <= '9') {
+        value = value * 10 + (*s - '0');
+        s++;
+    }
+    return sign * value;
+}
+
+static int search_net_split(char *line, char **fields, int max)
+{
+    int count = 0;
+    if (!line || max <= 0) return 0;
+
+    fields[count++] = line;
+    for (char *p = line; *p && count < max; p++) {
+        if (*p == '\t') {
+            *p = '\0';
+            fields[count++] = p + 1;
+        }
+    }
+    return count;
+}
+
+static void search_net_handle_line(char *line)
+{
+    char *fields[6];
+    int count = search_net_split(line, fields, 6);
+    if (count < 1) return;
+
+    if (strcmp(fields[0], "R") == 0 && count >= 3) {
+        int id = search_net_parse_int(fields[1]);
+        if (id != search_net_seq) {
+            search_net_resp_id = -1;
+            return;
+        }
+        search_net_resp_id = id;
+        search_net_count = 0;
+        search_net_total = search_net_parse_int(fields[2]);
+        if (search_net_total < 0) search_net_total = 0;
+        search_net_state = SEARCH_NET_WAITING;
+        search_net_wait_start = timer_ticks();
+    } else if (strcmp(fields[0], "T") == 0 && count >= 5) {
+        if (search_net_resp_id != search_net_seq) return;
+        search_add_net(fields[1], fields[2], fields[3], fields[4]);
+        search_net_wait_start = timer_ticks();
+    } else if (strcmp(fields[0], "END") == 0 && count >= 2) {
+        if (search_net_parse_int(fields[1]) != search_net_seq) return;
+        search_net_resp_id = -1;
+        search_net_state = SEARCH_NET_READY;
+        search_net_total = search_net_count;
+        search_merge_results();
+        ui_dirty = 1;
+    } else if (strcmp(fields[0], "E") == 0 && count >= 2) {
+        if (search_net_parse_int(fields[1]) != search_net_seq) return;
+        search_net_resp_id = -1;
+        search_net_state = SEARCH_NET_ERROR;
+        search_merge_results();
+        ui_dirty = 1;
+    }
+}
+
+static void search_net_reset(void)
+{
+    search_net_seq++;
+    search_net_resp_id = -1;
+    search_net_count = 0;
+    search_net_total = 0;
+    search_net_line_len = 0;
+    search_detail = -1;
+
+    if (!search_query[0]) {
+        search_net_state = serial2_present() ? SEARCH_NET_IDLE : SEARCH_NET_OFF;
+        return;
+    }
+    if (!serial2_present()) {
+        search_net_state = SEARCH_NET_OFF;
+        return;
+    }
+
+    /* Tus vuruslari durulsun; son sorguyu 400 ms sonra gonder. */
+    search_net_state = SEARCH_NET_PENDING;
+    search_net_send_tick = timer_ticks() + 40;
+}
+
+static void search_net_send(void)
+{
+    char line[64];
+    string_format(line, sizeof(line), "Q\t%d\t%s\n", search_net_seq, search_query);
+    serial2_write(line);
+    search_net_resp_id = -1;
+    search_net_state = SEARCH_NET_WAITING;
+    search_net_wait_start = timer_ticks();
+}
+
+static void search_poll_net(void)
+{
+    if (!serial2_present()) {
+        if (search_net_state != SEARCH_NET_OFF &&
+            search_net_state != SEARCH_NET_IDLE) {
+            search_net_state = SEARCH_NET_OFF;
+            search_merge_results();
+            ui_dirty = 1;
+        }
+        return;
+    }
+
+    int c;
+    while ((c = serial2_read()) >= 0) {
+        if (c == '\n') {
+            search_net_line[search_net_line_len] = '\0';
+            if (search_net_line_len > 0) {
+                search_net_handle_line(search_net_line);
+            }
+            search_net_line_len = 0;
+        } else if (c != '\r') {
+            if (search_net_line_len < SEARCH_NET_LINE_MAX - 1) {
+                search_net_line[search_net_line_len++] = (char)c;
+            } else {
+                search_net_line_len = 0;   /* asiri uzun satiri at */
+            }
+        }
+    }
+
+    uint32_t now = timer_ticks();
+    if (search_net_state == SEARCH_NET_PENDING &&
+        (int32_t)(now - search_net_send_tick) >= 0) {
+        search_net_send();
+    } else if (search_net_state == SEARCH_NET_WAITING &&
+               (uint32_t)(now - search_net_wait_start) > SEARCH_NET_TIMEOUT) {
+        search_net_state = SEARCH_NET_ERROR;
+        search_net_resp_id = -1;
+        search_merge_results();
+        ui_dirty = 1;
     }
 }
 
 static void search_run(void)
 {
-    search_result_count = 0;
-    search_total = 0;
+    search_local_count = 0;
+    search_local_total = 0;
 
     if (!search_query[0]) {
         /* Bos sorguda hizli erisim kartlari. */
         for (uint32_t i = 0; i < sizeof(search_apps) / sizeof(search_apps[0]); i++) {
-            search_add(SEARCH_TYPE_APP, search_apps[i].icon, search_apps[i].color,
-                       search_apps[i].name, "Uygulama | tikla ac",
-                       search_apps[i].detail, "", search_apps[i].win_id);
+            search_add_local(SEARCH_TYPE_APP, search_apps[i].icon, search_apps[i].color,
+                             search_apps[i].name, "Uygulama | tikla ac",
+                             search_apps[i].detail, "", search_apps[i].win_id);
         }
+        search_net_reset();
+        search_merge_results();
         return;
     }
 
@@ -702,9 +931,9 @@ static void search_run(void)
     for (uint32_t i = 0; i < sizeof(search_apps) / sizeof(search_apps[0]); i++) {
         if (search_contains(search_apps[i].name, search_query) ||
             search_contains(search_apps[i].detail, search_query)) {
-            search_add(SEARCH_TYPE_APP, search_apps[i].icon, search_apps[i].color,
-                       search_apps[i].name, "Uygulama | tikla ac",
-                       search_apps[i].detail, "", search_apps[i].win_id);
+            search_add_local(SEARCH_TYPE_APP, search_apps[i].icon, search_apps[i].color,
+                             search_apps[i].name, "Uygulama | tikla ac",
+                             search_apps[i].detail, "", search_apps[i].win_id);
         }
     }
 
@@ -715,11 +944,15 @@ static void search_run(void)
     for (uint32_t i = 0; i < sizeof(search_commands) / sizeof(search_commands[0]); i++) {
         if (search_contains(search_commands[i].name, search_query) ||
             search_contains(search_commands[i].detail, search_query)) {
-            search_add(SEARCH_TYPE_CMD, ">", UI_ACCENT, search_commands[i].name,
-                       "Komut | Terminalde calistirin",
-                       search_commands[i].detail, "", -1);
+            search_add_local(SEARCH_TYPE_CMD, ">", UI_ACCENT, search_commands[i].name,
+                             "Komut | Terminalde calistirin",
+                             search_commands[i].detail, "", -1);
         }
     }
+
+    /* 4. Internet: host koprusune sorgu planla. */
+    search_net_reset();
+    search_merge_results();
 }
 
 static void search_activate(int index)
@@ -727,6 +960,12 @@ static void search_activate(int index)
     if (index < 0 || index >= search_result_count) return;
 
     search_result_t *r = &search_results[index];
+    if (r->type == SEARCH_TYPE_NET) {
+        search_detail = index;
+        ui_dirty = 1;
+        return;
+    }
+
     if (r->type == SEARCH_TYPE_FILE && r->path[0]) {
         ui_notepad_open_file(r->path);
         ui_window_open(UI_WIN_NOTEPAD);
@@ -892,6 +1131,11 @@ int ui_handle_key(int key)
             }
             return 1;
         } else if (key == '\n') {
+            if (search_detail >= 0) {
+                search_detail = -1;
+                ui_dirty = 1;
+                return 1;
+            }
             if (search_query[0] && search_result_count > 0) {
                 search_activate(0);
             }
@@ -1833,15 +2077,118 @@ static void draw_settings_content(window_t *win)
 static void search_draw_clipped(int x, int y, const char *text,
                                 uint8_t fg, int max_chars)
 {
-    char buf[64];
+    char buf[192];
+    int len = text ? (int)strlen(text) : 0;
     int i = 0;
+
     if (max_chars > (int)sizeof(buf) - 1) max_chars = (int)sizeof(buf) - 1;
-    while (text && text[i] && i < max_chars) {
-        buf[i] = text[i];
-        i++;
+    if (len > max_chars) {
+        int keep = max_chars - 3;
+        if (keep < 0) keep = 0;
+        while (i < keep) {
+            buf[i] = text[i];
+            i++;
+        }
+        buf[i++] = '.';
+        buf[i++] = '.';
+        buf[i++] = '.';
+    } else {
+        while (i < len) {
+            buf[i] = text[i];
+            i++;
+        }
     }
     buf[i] = '\0';
     gfx_text(x, y, buf, fg, 0xFF);
+}
+
+/* Uzun metni kelime sinirlarina yaklasarak en fazla max_lines satira sigdirir. */
+static void search_draw_wrapped(int x, int y, const char *text,
+                                uint8_t fg, int max_chars, int max_lines)
+{
+    char buf[192];
+    int len = text ? (int)strlen(text) : 0;
+    int pos = 0;
+
+    if (max_chars > (int)sizeof(buf) - 1) max_chars = (int)sizeof(buf) - 1;
+
+    for (int line = 0; line < max_lines && pos < len; line++) {
+        int remaining = len - pos;
+        int capacity = max_chars;
+        int last = (line == max_lines - 1);
+        int take = remaining;
+
+        if (last && remaining > capacity) {
+            capacity = max_chars - 3;
+            if (capacity < 1) capacity = 1;
+            take = capacity;
+        } else if (take > capacity) {
+            take = capacity;
+        }
+
+        if (!last && pos + take < len) {
+            int br = take;
+            while (br > 0 && text[pos + br] != ' ') br--;
+            if (br > max_chars / 2) take = br;
+        }
+
+        int n = 0;
+        for (int i = 0; i < take && n < (int)sizeof(buf) - 4; i++) {
+            buf[n++] = text[pos + i];
+        }
+        while (n > 0 && buf[n - 1] == ' ') n--;
+
+        if (last && remaining > capacity) {
+            buf[n++] = '.';
+            buf[n++] = '.';
+            buf[n++] = '.';
+        }
+        buf[n] = '\0';
+
+        gfx_text(x, y + line * 12, buf, fg, 0xFF);
+
+        pos += take;
+        while (pos < len && text[pos] == ' ') pos++;
+    }
+}
+
+static const char *search_net_status_text(void)
+{
+    if (!serial2_present()) return "Internet: yok";
+
+    switch (search_net_state) {
+    case SEARCH_NET_PENDING:
+    case SEARCH_NET_WAITING:
+        return "Internet: araniyor";
+    case SEARCH_NET_READY:
+        return (search_net_total > 0) ? "Internet: hazir"
+                                      : "Internet: sonuc yok";
+    case SEARCH_NET_ERROR:
+        return "Internet: hata";
+    case SEARCH_NET_IDLE:
+        return "Internet: hazir";
+    default:
+        return "Internet: yok";
+    }
+}
+
+static uint8_t search_net_status_color(void)
+{
+    if (!serial2_present()) return VGA_DARK_GREY;
+
+    switch (search_net_state) {
+    case SEARCH_NET_PENDING:
+    case SEARCH_NET_WAITING:
+        return VGA_YELLOW;
+    case SEARCH_NET_READY:
+        return (search_net_total > 0) ? VGA_LIGHT_GREEN : VGA_LIGHT_GREY;
+    case SEARCH_NET_ERROR:
+        return VGA_LIGHT_RED;
+    case SEARCH_NET_IDLE:
+        return VGA_LIGHT_GREEN;
+    default:
+        return VGA_DARK_GREY;
+    }
 }
 
 static void draw_search_content(window_t *win)
@@ -1869,7 +2216,7 @@ static void draw_search_content(window_t *win)
                  logo_cols[i], 0xFF);
     }
 
-    const char *subtitle = "Yerel arama motoru";
+    const char *subtitle = "Yerel + internet arama";
     int sub_x = x + (win->w - (int)strlen(subtitle) * 8) / 2;
     gfx_text(sub_x, y + 52, subtitle, VGA_DARK_GREY, 0xFF);
 
@@ -1887,7 +2234,7 @@ static void draw_search_content(window_t *win)
         }
     } else {
         gfx_text(field_x + 12, field_y + 12,
-                 "Dosya, uygulama veya komut ara...", VGA_DARK_GREY, 0xFF);
+                 "Dosya, uygulama veya web ara...", VGA_DARK_GREY, 0xFF);
     }
 
     /* Ara butonu */
@@ -1906,7 +2253,7 @@ static void draw_search_content(window_t *win)
 
     const char *hint = search_query[0]
         ? "Enter: ilk sonucu ac | yazmaya devam edin"
-        : "RamFS dosyalari, uygulamalar ve kabuk komutlari";
+        : "RamFS, uygulamalar ve web uzerinde arama";
     int hint_x = x + (win->w - (int)strlen(hint) * 8) / 2;
     if (hint_x < x + 20) hint_x = x + 20;
     search_draw_clipped(hint_x, y + 112, hint, VGA_DARK_GREY, 60);
@@ -1915,12 +2262,63 @@ static void draw_search_content(window_t *win)
     int row_x = x + 20;
     int row_w = win->w - 40;
 
-    if (search_result_count == 0) {
+    if (search_detail >= 0 && search_detail < search_result_count) {
+        search_result_t *r = &search_results[search_detail];
+        int dx = row_x;
+        int dy = y + SEARCH_RESULTS_TOP;
+        int dw = row_w;
+        int dh = 250;
+        int text_chars = (dw - 32) / 8;
+
+        gfx_fill_rounded_rect_rgb(dx, dy, dw, dh, 5, gfx_rgb(23, 28, 39));
+        gfx_rect_rounded_rgb(dx, dy, dw, dh, 5, gfx_rgb(60, 130, 190));
+        gfx_text(dx + 16, dy + 10, "WEB SONUCU", UI_ACCENT, 0xFF);
+
+        int back_x = dx + dw - 68;
+        int back_y = dy + 8;
+        int back_hover = (mx >= back_x && mx <= back_x + 52 &&
+                          my >= back_y && my <= back_y + 22);
+        gfx_fill_rounded_rect_rgb(back_x, back_y, 52, 22, 3,
+                                  back_hover ? gfx_rgb(45, 58, 82)
+                                             : gfx_rgb(28, 35, 50));
+        gfx_rect_rounded_rgb(back_x, back_y, 52, 22, 3,
+                             back_hover ? gfx_rgb(95, 205, 255)
+                                        : gfx_rgb(55, 70, 95));
+        gfx_text(back_x + 11, back_y + 7, "Geri", VGA_WHITE, 0xFF);
+
+        search_draw_clipped(dx + 16, dy + 32, r->title, VGA_WHITE, text_chars);
+        search_draw_clipped(dx + 16, dy + 50, r->meta, UI_ACCENT, text_chars);
+
+        gfx_text(dx + 16, dy + 74, "URL", VGA_DARK_GREY, 0xFF);
+        search_draw_wrapped(dx + 16, dy + 86, r->path,
+                            VGA_LIGHT_CYAN, text_chars, 2);
+
+        gfx_text(dx + 16, dy + 122, "Ozet", VGA_DARK_GREY, 0xFF);
+        search_draw_wrapped(dx + 16, dy + 134, r->detail,
+                            VGA_LIGHT_GREY, text_chars, 3);
+
+        gfx_hline_rgb(dx + 16, dy + 172, dw - 32, gfx_rgb(45, 55, 74));
+        gfx_text(dx + 16, dy + 184, "DuckDuckGo uzerinden anonim arama",
+                 VGA_DARK_GREY, 0xFF);
+        gfx_text(dx + 16, dy + 200, "Sayfa icerigi bu surumde goruntulenmiyor.",
+                 VGA_DARK_GREY, 0xFF);
+    } else if (search_result_count == 0) {
         const char *none = "Sonuc bulunamadi";
+        const char *tip = "Dosya adi, icerik, uygulama veya komut deneyin.";
+
+        if (search_query[0] &&
+            (search_net_state == SEARCH_NET_PENDING ||
+             search_net_state == SEARCH_NET_WAITING)) {
+            none = "Internet araniyor...";
+            tip = "Yerel eslesme yok; web sonuclari bekleniyor.";
+        } else if (search_query[0] && search_net_state == SEARCH_NET_ERROR) {
+            none = "Internet baglantisi yok";
+            tip = "Yerel sonuc yok. Yerel aramada kalabilirsiniz.";
+        }
+
         int nx = x + (win->w - (int)strlen(none) * 8) / 2;
         gfx_text(nx, y + SEARCH_RESULTS_TOP + 52, none, UI_ACCENT, 0xFF);
 
-        const char *tip = "Dosya adi, icerik, uygulama veya komut deneyin.";
         int tx = x + (win->w - (int)strlen(tip) * 8) / 2;
         if (tx < x + 20) tx = x + 20;
         search_draw_clipped(tx, y + SEARCH_RESULTS_TOP + 72, tip,
@@ -1957,25 +2355,62 @@ static void draw_search_content(window_t *win)
     }
 
     /* Alt durum satiri */
+    int local_shown = search_local_count;
+    int net_shown = 0;
+    if (search_net_state == SEARCH_NET_READY && search_net_count > 0) {
+        if (local_shown > 3) local_shown = 3;
+        net_shown = search_net_count;
+        if (net_shown > SEARCH_MAX_RESULTS - local_shown) {
+            net_shown = SEARCH_MAX_RESULTS - local_shown;
+        }
+    } else if (local_shown > SEARCH_MAX_RESULTS) {
+        local_shown = SEARCH_MAX_RESULTS;
+    }
+
     char status[80];
     if (!search_query[0]) {
         string_format(status, sizeof(status), "Hizli erisim | %d uygulama",
-                      search_total);
+                      search_local_total);
     } else if (search_total == 0) {
-        string_format(status, sizeof(status), "Sonuc bulunamadi | yerel arama");
-    } else if (search_total > SEARCH_MAX_RESULTS) {
-        string_format(status, sizeof(status), "%d sonuc | ilk %d gosteriliyor",
+        if (search_net_state == SEARCH_NET_PENDING ||
+            search_net_state == SEARCH_NET_WAITING) {
+            string_format(status, sizeof(status), "Yerel sonuc yok | web araniyor");
+        } else if (search_net_state == SEARCH_NET_ERROR) {
+            string_format(status, sizeof(status), "Sonuc bulunamadi | web yok");
+        } else {
+            string_format(status, sizeof(status), "Sonuc bulunamadi");
+        }
+    } else if (search_net_state == SEARCH_NET_READY && net_shown > 0) {
+        if (search_total > search_result_count) {
+            string_format(status, sizeof(status),
+                          "%d sonuc | ilk %d: %d yerel + %d web",
+                          search_total, search_result_count,
+                          local_shown, net_shown);
+        } else {
+            string_format(status, sizeof(status), "%d sonuc | %d yerel + %d web",
+                          search_total, local_shown, net_shown);
+        }
+    } else if (search_net_state == SEARCH_NET_PENDING ||
+               search_net_state == SEARCH_NET_WAITING) {
+        string_format(status, sizeof(status), "%d yerel eslesme | web araniyor",
+                      search_local_total);
+    } else if (search_net_state == SEARCH_NET_ERROR) {
+        string_format(status, sizeof(status), "%d yerel eslesme | web yok",
+                      search_local_total);
+    } else if (search_total > search_result_count) {
+        string_format(status, sizeof(status), "%d sonuc | ilk %d yerel",
                       search_total, search_result_count);
     } else {
         string_format(status, sizeof(status), "%d sonuc | yerel arama",
                       search_total);
     }
     search_draw_clipped(x + SEARCH_PAD, y + win->h - 20, status,
-                        VGA_DARK_GREY, 50);
+                        VGA_DARK_GREY, 48);
 
-    const char *offline = "RamFS | internet yok";
-    int off_x = x + win->w - SEARCH_PAD - (int)strlen(offline) * 8;
-    gfx_text(off_x, y + win->h - 20, offline, VGA_DARK_GREY, 0xFF);
+    const char *net_text = search_net_status_text();
+    int net_x = x + win->w - SEARCH_PAD - (int)strlen(net_text) * 8;
+    gfx_text(net_x, y + win->h - 20, net_text,
+             search_net_status_color(), 0xFF);
 }
 
 static void draw_desktop_icons(void)
@@ -2649,6 +3084,20 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                 /* Sonuc satirlari */
                 int row_x = w->x + 20;
                 int row_w = w->w - 40;
+
+                /* Detay karti aciksa yalnizca Geri butonu ve kart disi tiklama. */
+                if (search_detail >= 0 && search_detail < search_result_count) {
+                    int dy = w->y + SEARCH_RESULTS_TOP;
+                    int back_x = row_x + row_w - 68;
+                    int back_y = dy + 8;
+                    if (mx >= back_x && mx <= back_x + 52 &&
+                        my >= back_y && my <= back_y + 22) {
+                        search_detail = -1;
+                    }
+                    ui_dirty = 1;
+                    return;
+                }
+
                 for (int r = 0; r < search_result_count; r++) {
                     int row_y = w->y + SEARCH_RESULTS_TOP + r * SEARCH_ROW_H;
                     if (mx >= row_x && mx <= row_x + row_w &&
@@ -2764,6 +3213,8 @@ void ui_poll(void)
         rtc_format_time(clock_text);
         ui_dirty = 1;
     }
+
+    search_poll_net();
 
     int mx, my, buttons;
     mouse_get_state(&mx, &my, &buttons);

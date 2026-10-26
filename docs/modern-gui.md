@@ -12,7 +12,7 @@ Bu belge, casrev-os v0.9'daki 16-bit masaüstü mimarisini ve görsel katmanı �
   (1,5 MB, `.bss`). Tüm UI çizimi burada yapılır; `gfx_flush()` yalnızca
   görünen 800×600 bölümü satır satır LFB'ye kopyalar.
 - **UI:** `src/kernel/ui.c` içinde masaüstü, pencereler, görev çubuğu, Başlat
-  menüsü, duvar kağıtları, yerel Arama ve uygulama içerikleri.
+  menüsü, duvar kağıtları, yerel + internet Arama ve uygulama içerikleri.
 - **Girdi:** PS/2 klavye (IRQ1) ve fare (IRQ12); `shell_run()` döngüsü
   `ui_poll()` + `keyboard_getchar()` ile olayları işler.
 - **Yenileme:** UI yalnızca kirli bayrak set edildiğinde yeniden çizilir.
@@ -120,35 +120,83 @@ RGB gradyanıdır; iki yarım parça hâlinde `gfx_gradient_v()` ile çizilir:
 5. Mayın Tarlası — 9×9 oyun tahtası ve bayrak koyma.
 6. Hesap Makinesi — fare ve klavye ile dört işlem.
 7. Sistem Bilgisi — tick, uptime, RTC, RAM çubuğu.
-8. Arama — Google görünümlü, çevrimdışı yerel arama.
+8. Arama — Google görünümlü; yerel kaynaklar ve anonim internet sonuçları.
 9. Ayarlar — duvar kağıdı, klavye bilgisi, kısayollar, canlı sistem durumu.
 
-## Yerel Arama
+## Arama (yerel + internet)
 
-Arama uygulaması, gerçek bir tarayıcı yerine işletim sisteminin kendi verileri
-üzerinde çalışan çevrimdışı bir arama motorudur. Pencere `140,50` konumunda
-`520×420` boyutundadır; başlıkta renkli `casrev` logosu, altında arama alanı ve
-`Ara` butonu bulunur.
+Arama uygulaması, RamFS ve çekirdek içi tabloları tarayan yerel arama ile
+DuckDuckGo üzerinden gelen anonim web sonuçlarını aynı listede birleştirir.
+Pencere `140,50` konumunda `520×420` boyutundadır; başlıkta renkli `casrev`
+logosu, altında arama alanı ve `Ara` butonu bulunur.
 
-- **Aranan kaynaklar (öncelik sırasıyla):**
+- **Yerel kaynaklar (öncelik sırasıyla):**
   1. Uygulama adı ve açıklaması (Terminal, Ayarlar, Not Defteri, ...).
   2. RamFS dosyaları: dosya adı, tam yol ve dosya içeriği.
   3. Kabuk komutları: komut adı ve açıklaması (`help`, `settings`, `arama`, ...).
 - **Eşleştirme:** `search_fold()` Türkçe karakterleri ASCII karşılıklarına
   katlar ve büyük/küçük harf duyarsız alt dizi araması yapar. Böylece `gorev`,
   `Görev` ve `GOREV` aynı sonucu bulur.
-- **Sonuçlar:** En fazla beş satır gösterilir. Her satırda renkli ikon, başlık,
-  tür/yol bilgisi ve dosyalar için içerikten tek satırlık bağlam özeti yer alır.
-  Alt durum çubuğu toplam sonuç sayısını ve `RamFS | internet yok` bilgisini
-  gösterir.
+- **Birleştirme:** Toplam en fazla beş satır gösterilir. Web sonucu varsa
+  en fazla üç yerel + iki web satırı, yoksa beş yerel satır gösterilir. Web
+  satırları mavi `W` ikonu ve `Internet | site` meta bilgisiyle ayrılır.
 - **Boş sorgu:** Hızlı erişim kartları olarak ilk beş uygulama listelenir.
 - **Eylemler:** Dosya sonucu Not Defterinde açılır; uygulama sonucu ilgili
-  pencereyi öne getirir; komut sonucu Terminali etkinleştirir. `Enter` ilk
-  sonucu açar, `Backspace` sorguyu düzenler.
+  pencereyi öne getirir; komut sonucu Terminali etkinleştirir. Web sonucu
+  `WEB SONUCU` kartını açar: başlık, site, URL, özet ve `Geri` düğmesi.
+  `Enter` ilk sonucu açar, `Backspace` sorguyu düzenler; detay kartı açıkken
+  `Enter` veya `Geri` kapatır.
+- **Durum çubuğu:** Solda toplam/yerel/web sonuç sayısı, sağda
+  `Internet: hazir`, `Internet: araniyor`, `Internet: sonuc yok`,
+  `Internet: hata` veya `Internet: yok` durumu renkli gösterilir.
+- **Çevrimdışı davranış:** COM2 yoksa veya ajan yanıt vermezse yerel arama
+  aynen çalışır; beş yerel sonuç gösterilir. Web satırları yalnızca başarılı
+  yanıttan sonra listeye eklenir.
 - **Kabuktan:** `search [sorgu]` veya `arama [sorgu]` komutu pencereyi isteğe
   bağlı hazır sorguyla açar.
-- **Ağ yok:** NIC, IP, DNS, HTTP veya TLS katmanı yoktur; arama tamamen yerel
-  RamFS ve çekirdek içi tablolar üzerinde çalışır.
+
+## İnternet arama köprüsü
+
+Misafir işletim sisteminde NIC sürücüsü, ARP/IP, DNS, TCP veya TLS yoktur.
+Bu adımda gerçek internet erişimi host tarafındaki küçük bir Python ajanına
+devredilir; misafir yalnızca COM2 seri hattını kullanır.
+
+```
+casrev-os (guest)                    host
+┌──────────────────┐   COM2 TCP     ┌──────────────────────────┐
+│ ui.c search_run  │ 127.0.0.1:5568 │ scripts/search-agent.py  │
+│ serial2_write  ──┼───────────────►│ DuckDuckGo HTML          │
+│ serial2_read   ◄─┼────────────────│ Wikipedia API (yedek)    │
+└──────────────────┘   Q/R/T/END    └──────────────────────────┘
+```
+
+- **QEMU:** `scripts/run.ps1` ajanı gizli pencerede başlatır ve ikinci seri
+  portu `-serial tcp:127.0.0.1:5568,server=on,wait=off` olarak ekler. COM1
+  (`0x3F8`) log/stdio için, COM2 (`0x2F8`) arama köprüsü için ayrılmıştır.
+- **Protokol:** Sekmeyle ayrılmış, CP1254 kodlu satırlar:
+
+  | Yön | Satır | Anlam |
+  |-----|-------|-------|
+  | Misafir → host | `Q\t<id>\t<sorgu>\n` | Yeni arama isteği |
+  | Host → misafir | `R\t<id>\t<sayı>\n` | Sonuç sayısı |
+  | Host → misafir | `T\t<başlık>\t<site>\t<URL>\t<özet>\n` | Bir web sonucu |
+  | Host → misafir | `END\t<id>\n` | Yanıt bitti |
+  | Host → misafir | `E\t<id>\t<mesaj>\n` | Arama hatası |
+
+- **Zamanlama:** Tuş vuruşları 400 ms debounce edilir; yanıt 8 saniye içinde
+  gelmezse UI `Internet: hata` durumuna geçer ve yerel sonuçlara döner.
+- **Ajan:** DuckDuckGo `html.duckduckgo.com/html/?q=...` sayfasını ayrıştırır;
+  yeterli sonuç yoksa Türkçe ve İngilizce Wikipedia API'sine düşer. Hesap,
+  API anahtarı ve çerez kullanmaz. Başlık 76, site 36, URL 156, özet 136
+  karaktere sınırlanır; sekmeler ve kontrol karakterleri temizlenir.
+- **Gizlilik:** Sorgu yalnızca host üzerinden arama motoruna gider; COM2
+  bağlantısı `127.0.0.1` ile sınırlıdır. Ajan kalıcı kimlik veya arama geçmişi
+  tutmaz.
+- **Sınırlar:** Web sonucu sayfası tarayıcıda açılmaz; yalnızca başlık, site,
+  URL ve özet gösterilir. Gerçek sayfa çizimi, native NIC/TCP/TLS yığını ve
+  kalıcı çerezler bu sürümün kapsamı dışındadır.
+- **Kapalı mod:** `scripts/run.ps1 -NoInternet` ajanı ve COM2'yi devre dışı
+  bırakır; uygulama yalnızca yerel aramayla çalışır.
 
 ## Türkçe-Q klavye
 
@@ -180,8 +228,14 @@ Arama uygulaması, gerçek bir tarayıcı yerine işletim sisteminin kendi veril
 - `scripts/test-search.ps1`: masaüstü Arama simgesi, boş sorgu hızlı erişimi,
   `gorev` ile RamFS dosyası ve Not Defteri, `ayar` ile Ayarlar uygulaması,
   `help` ile kabuk komutu sonucu ve Terminalin öne gelmesi.
+- `scripts/test-search-online.ps1`: Python ajanını başlatır, QEMU'ya COM2
+  ekler, gerçek `Linux` sorgusunu DuckDuckGo üzerinden çalıştırır; web
+  satırlarını, `WEB SONUCU` detay kartını ve `Geri` düğmesini doğrular.
+  Ardından `ayar` sorgusuyla üç yerel + iki web satırını aynı listede gösterip
+  birleşik görünümü ve web detay kartını kaydeder.
 - Ekran görüntüleri `build/settings-*.png`, `build/search-*.png`,
-  `build/gui.png` ve belge görselleri `docs/stage10.png` ile `docs/arama.png`
+  `build/search-online-*.png`, `build/gui.png` ve belge görselleri
+  `docs/stage10.png`, `docs/arama.png` ile `docs/arama-online.png`
   olarak saklanır; QEMU `screendump` çıktısı `build/ppm2png.py` ile PNG'ye
   çevrilir.
 
@@ -189,6 +243,7 @@ Arama uygulaması, gerçek bir tarayıcı yerine işletim sisteminin kendi veril
 
 1. ATA PIO + FAT12 ile kalıcı dosyalar.
 2. Süreçler, görev değiştirme ve sistem çağrıları.
-3. Daha fazla uygulama ve oyun.
-4. Animasyonlar, pencere geçişleri ve kullanıcı tema desteği.
-5. Kararlılık/performans ölçümleri ve optimizasyonlar.
+3. Native NIC + TCP/IP + TLS yığını ve tam sayfa tarayıcı.
+4. Daha fazla uygulama ve oyun.
+5. Animasyonlar, pencere geçişleri ve kullanıcı tema desteği.
+6. Kararlılık/performans ölçümleri ve optimizasyonlar.

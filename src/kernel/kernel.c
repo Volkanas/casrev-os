@@ -30,6 +30,7 @@ void kernel_main(void)
         memset((void *)bi->fb_addr, 0x00, fb_size);
     }
 
+    serial2_init();
     vga_init();
     serial_init();
 

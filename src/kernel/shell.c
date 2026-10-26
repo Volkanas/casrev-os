@@ -67,7 +67,7 @@ static void command_help(void)
     kprintf("  calc      Hesap Makinesi penceresini acar\n");
     kprintf("  sysinfo   Sistem Bilgisi penceresini acar\n");
     kprintf("  settings  Ayarlar penceresini acar\n");
-    kprintf("  search    Yerel arama penceresini acar\n");
+    kprintf("  search    Arama penceresini acar (yerel + internet)\n");
     kprintf("  about     Sistem bilgisi\n");
     kprintf("  launcher  Baslat menusunu acar/kapatir (ESC)\n");
     kprintf("  reboot    Sistemi yeniden baslatir\n");
@@ -259,7 +259,7 @@ static void execute(void)
         kprintf("Ayarlar penceresi acildi.\n");
     } else if (strcmp(cmd, "search") == 0 || strcmp(cmd, "arama") == 0) {
         ui_search_open(arg);
-        kprintf("Yerel arama acildi.\n");
+        kprintf("Arama acildi.\n");
     } else if (strcmp(cmd, "about") == 0) {
         ui_window_open(UI_WIN_SYSINFO);
         kprintf("casrev-os v0.9 - 32-bit x86\n");
