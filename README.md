@@ -8,6 +8,8 @@ Her aşama çalışır durumda bırakılır: derle, QEMU'da aç, sonucu gör.
 
 ![casrev-os v0.9 16-bit masaüstü](docs/stage10.png)
 
+![Yerel Arama uygulaması](docs/arama.png)
+
 ## Hızlı başlangıç
 
 **`BASLAT.bat`** dosyasına çift tıklayın. Proje derlenir ve QEMU penceresi açılır.
@@ -44,20 +46,24 @@ powershell -ExecutionPolicy Bypass -File scripts/test.ps1           # açılış
 powershell -ExecutionPolicy Bypass -File scripts/test-shell.ps1     # klavye + fare + kabuk
 powershell -ExecutionPolicy Bypass -File scripts/test-gui.ps1       # masaüstü + Not Defteri
 powershell -ExecutionPolicy Bypass -File scripts/test-settings.ps1  # Ayarlar + pencere yönetimi + Türkçe tuşlar
+powershell -ExecutionPolicy Bypass -File scripts/test-search.ps1    # yerel Arama: dosya, uygulama, komut
 ```
 
-`test-shell.ps1` ve `test-settings.ps1` QEMU monitor üzerinden gerçek tuş
-basışları ve fare hareketleri gönderir. `test-settings.ps1` ayrıca duvar kağıdı
-değiştirme, büyütme/geri yükleme, küçültme, görev çubuğundan geri açma,
-sekiz uygulama açıkken görev çubuğu yerleşimi, Başlat menüsü hover'ı ve Türkçe karakter yazımını
-ekran görüntüleriyle doğrular (`build/settings-*.png`).
+`test-shell.ps1`, `test-settings.ps1` ve `test-search.ps1` QEMU monitor üzerinden
+gerçek tuş basışları ve fare hareketleri gönderir. `test-settings.ps1` ayrıca
+duvar kağıdı değiştirme, büyütme/geri yükleme, küçültme, görev çubuğundan geri
+açma, sekiz uygulama açıkken görev çubuğu yerleşimi, Başlat menüsü hover'ı ve
+Türkçe karakter yazımını ekran görüntüleriyle doğrular
+(`build/settings-*.png`). `test-search.ps1`, RamFS dosyası (`gorevler.txt`),
+uygulama (Ayarlar) ve kabuk komutu (`help`) sonuçlarını açıp ekran görüntüleriyle
+kaydeder (`build/search-*.png`).
 
 ## Modern Masaüstü ve Uygulamalar (v0.9, 16-bit)
 
 - **VESA Mode 0x114:** 800×600, 65.536 renk (RGB565), 16-bit doğrusal (LFB) framebuffer; eski palet renkleri uyumluluk için RGB565'e eşlenir.
 - **16-bit görsel katman:** Tam renkli gradyan duvar kağıtları, yumuşak pencere gölgeleri, yarı saydam görev çubuğu/Başlat menüsü ve gradyan başlık çubukları.
 - **Etkileşim cilâsı:** Masaüstü simgeleri, Başlat menüsü öğeleri ve pencere düğmeleri için hover vurguları.
-- **Sekiz yerleşik uygulama:** Terminal, Dosya Gezgini, Not Defteri, Paint, Mayın Tarlası, Hesap Makinesi, Sistem Bilgisi ve Ayarlar.
+- **Dokuz yerleşik uygulama:** Terminal, Dosya Gezgini, Not Defteri, Paint, Mayın Tarlası, Hesap Makinesi, Sistem Bilgisi, Arama ve Ayarlar.
 - **Pencere yönetimi:**
   - Pencereler başlık çubuğundan sürüklenebilir.
   - `[-]` küçültür, `[ ]` büyütür/geri yükler, `[x]` kapatır.
@@ -71,7 +77,8 @@ ekran görüntüleriyle doğrular (`build/settings-*.png`).
   - Modern "Başlat" butonu (ESC veya fare ile açılır).
   - Açık pencereler için dinamik genişlikte sekmeler; tıklayınca küçült/geri aç.
   - Sistem tepsisi: canlı PMM RAM kullanımı (`RAM: X/31M`), fare koordinatları ve RTC saati.
-- **Başlat menüsü:** Yarı saydam koyu panel, hover vurgulu sekiz uygulama, yeniden başlat ve kapat.
+- **Başlat menüsü:** Yarı saydam koyu panel, hover vurgulu dokuz uygulama, yeniden başlat ve kapat.
+- **Yerel Arama:** Google görünümlü, tamamen çevrimdışı arama penceresi; RamFS dosyalarını, uygulamaları ve kabuk komutlarını tarar.
 - **Dört duvar kağıdı:** 16-bit gradyanlı yıldızlı gece silueti, okyanus, gün batımı ve sade klasik tema.
 - **Sanal Dosya Sistemi (RamFS):** Bellek içi klasör/dosya hiyerarşisi; Dosya Gezgini ve Not Defteri ile düzenlenebilir.
 
@@ -87,7 +94,8 @@ ekran görüntüleriyle doğrular (`build/settings-*.png`).
 5. **Mayın Tarlası:** 9×9 ızgara, 10 mayın, sayaç, gülen yüz sıfırlama, sol tıkla açma, sağ tıkla bayrak.
 6. **Hesap Makinesi:** Tıklanabilir butonlar ve klavye desteği, LCD ekran.
 7. **Sistem Bilgisi:** CPU tick, çalışma süresi, donanım durumları ve canlı RAM doluluk çubuğu.
-8. **Ayarlar:** Duvar kağıdı seçimi, klavye bilgisi, kısayollar ve canlı sistem durumu.
+8. **Arama (Yerel):** Google'a benzeyen sade arayüz; yazarken RamFS dosya adı/yolu/içeriği, uygulamalar ve kabuk komutları arasında anında arama. Dosya sonucu Not Defterinde, uygulama sonucu ilgili pencerede, komut sonucu Terminalde açılır. İnternet bağlantısı gerektirmez.
+9. **Ayarlar:** Duvar kağıdı seçimi, klavye bilgisi, kısayollar ve canlı sistem durumu.
 
 ## Türkçe-Q klavye
 
@@ -132,6 +140,7 @@ Windows-1254 kodlarıyla üretilir ve 8×8 özel gliflerle çizilir.
 | `calc` | Hesap Makinesi penceresini açar |
 | `sysinfo` | Sistem Bilgisi penceresini açar |
 | `settings`, `ayarlar` | Ayarlar penceresini açar |
+| `search [sorgu]`, `arama` | Yerel arama penceresini açar; sorgu verilirse sonuçları hazırlar |
 | `launcher` | Başlat menüsünü açar/kapatır (ESC) |
 | `uptime` | Çalışma süresi ve tick sayısı |
 | `echo ...` | Metni ekrana yazar |
@@ -155,6 +164,7 @@ Windows-1254 kodlarıyla üretilir ve 8×8 özel gliflerle çizilir.
 - [x] **Aşama 7** — Modern Masaüstü GUI, pencereli Terminal, görev çubuğu, Başlat menüsü, Hesap Makinesi, Sistem Monitörü
 - [x] **Aşama 8** — Sanal Dosya Sistemi (RamFS), Dosya Gezgini, Not Defteri, Paint, Mayın Tarlası
 - [x] **Aşama 8.5 (v0.9)** — Tam Türkçe-Q klavye, Ayarlar uygulaması, dört duvar kağıdı, 16-bit RGB565 görsel paket, büyütme/geri yükleme
+- [x] **Aşama 8.6** — Google görünümlü yerel Arama: RamFS dosyaları, uygulamalar ve kabuk komutları arasında çevrimdışı arama
 - [ ] **Aşama 9** — Kalıcı dosya sistemi (ATA/FAT12), dosyaların yeniden başlatmada korunması
 - [ ] **Aşama 10** — Süreçler, görev değiştirme, sistem çağrıları
 - [ ] **Aşama 11** — Daha fazla uygulama, kararlılık ve performans çalışmaları
@@ -165,7 +175,8 @@ Windows-1254 kodlarıyla üretilir ve 8×8 özel gliflerle çizilir.
 casrev-os/
 ├── BASLAT.bat               # çift tıkla: derle + QEMU
 ├── docs/
-│   └── stage10.png          # v0.9 16-bit masaüstü ekran görüntüsü
+│   ├── stage10.png          # v0.9 16-bit masaüstü ekran görüntüsü
+│   └── arama.png            # yerel Arama uygulaması ekran görüntüsü
 ├── src/
 │   ├── boot/
 │   │   ├── boot.asm         # boot sector
@@ -180,7 +191,7 @@ casrev-os/
 │       ├── mouse.c/.h       # PS/2 aux fare, IRQ12, 3 baytlık paket
 │       ├── rtc.c/.h         # CMOS saat/tarih, BCD ve 12 saat dönüşümü
 │       ├── gfx.c/.h         # VESA LFB, RGB565 arka tampon, eski palet LUT'u, gradyan/gölge/alfa
-│       ├── ui.c/.h          # masaüstü, pencereler, Ayarlar, terminal, fare imleci
+│       ├── ui.c/.h          # masaüstü, pencereler, Arama, Ayarlar, terminal, fare imleci
 │       ├── shell.c/.h       # satır düzenleme + komutlar
 │       ├── bootinfo.h       # E820 / font / framebuffer boot_info_t
 │       ├── pmm.c/.h         # fiziksel kare yöneticisi (bitmap)
@@ -200,7 +211,8 @@ casrev-os/
 │   ├── test.ps1
 │   ├── test-shell.ps1
 │   ├── test-gui.ps1
-│   └── test-settings.ps1
+│   ├── test-settings.ps1
+│   └── test-search.ps1
 ├── build/                   # üretilen dosyalar (git'e girmez)
 └── README.md
 ```
@@ -254,6 +266,11 @@ casrev-os/
   `kfree` komşu boş blokları birleştirir.
 - **RamFS:** Dinamik düğümler heap üzerinde; dosya içerikleri `kmalloc` ile
   tutulur. Kalıcı değildir.
+- **Yerel Arama:** `ui.c` içindeki `search_run()` önce uygulama adı/açıklamasını,
+  sonra RamFS ağacını (dosya adı, tam yol ve içerik), sonra kabuk komutlarını
+  tarar. Türkçe karakterler `search_fold()` ile ASCII'ye katlanır; büyük/küçük
+  harf duyarsızdır. En fazla beş sonuç gösterilir, dosya eşleşmelerinde içerikten
+  tek satırlık bağlam özeti çıkarılır. Ağ katmanı yoktur; tamamen çevrimdışıdır.
 - Test çıktısı hem grafik terminale hem COM1'e yazılır; test betikleri QEMU
   `sendkey`, `mouse_move` ve `mouse_button` ile gerçek girişleri gönderip
   sonucu seri porttan ve ekran görüntülerinden doğrular.

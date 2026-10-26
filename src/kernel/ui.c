@@ -31,7 +31,7 @@ static uint8_t current_fg = VGA_LIGHT_GREEN;
 static uint8_t current_bg = VGA_BLACK;
 
 /* ========================================================================= */
-/* Pencere Yapisi (7 Adet Uygulama)                                          */
+/* Pencere Yapisi (9 Adet Uygulama)                                          */
 /* ========================================================================= */
 typedef struct {
     int id;
@@ -52,7 +52,8 @@ static window_t windows[UI_WIN_COUNT] = {
     { UI_WIN_NOTEPAD,  "Not Defteri",        200,  60, 440, 330, 0, 0, 0, 0, 0, 0, 0, 0 },
     { UI_WIN_PAINT,    "Paint / Cizim",      180,  50, 420, 350, 0, 0, 0, 0, 0, 0, 0, 0 },
     { UI_WIN_MINES,    "Mayin Tarlasi",      260,  60, 260, 320, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { UI_WIN_SETTINGS, "Ayarlar",            300,  80, 380, 330, 0, 0, 0, 0, 0, 0, 0, 0 }
+    { UI_WIN_SETTINGS, "Ayarlar",            300,  80, 380, 330, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { UI_WIN_SEARCH,   "Arama",              140,  50, 520, 420, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
 /* Masaustu duvar kagidi: 0=Gece, 1=Okyanus, 2=Gun Batimi, 3=Klasik */
@@ -440,6 +441,319 @@ void ui_term_putc(char c)
 }
 
 /* ========================================================================= */
+/* 6. Yerel Arama (Search) Durumu                                            */
+/* ========================================================================= */
+#define SEARCH_QUERY_MAX   40
+#define SEARCH_MAX_RESULTS 5
+#define SEARCH_TITLE_MAX   40
+#define SEARCH_META_MAX    72
+#define SEARCH_DETAIL_MAX  64
+#define SEARCH_PATH_MAX    96
+
+#define SEARCH_PAD         24
+#define SEARCH_FIELD_TOP   72
+#define SEARCH_FIELD_H     32
+#define SEARCH_BTN_W       80
+#define SEARCH_RESULTS_TOP 128
+#define SEARCH_ROW_H       44
+
+#define SEARCH_TYPE_FILE 1
+#define SEARCH_TYPE_APP  2
+#define SEARCH_TYPE_CMD  3
+
+typedef struct {
+    int type;
+    int action;
+    char icon[3];
+    uint8_t icon_color;
+    char title[SEARCH_TITLE_MAX];
+    char meta[SEARCH_META_MAX];
+    char detail[SEARCH_DETAIL_MAX];
+    char path[SEARCH_PATH_MAX];
+} search_result_t;
+
+typedef struct {
+    const char *name;
+    const char *detail;
+    const char *icon;
+    uint8_t color;
+    int win_id;
+} search_app_t;
+
+typedef struct {
+    const char *name;
+    const char *detail;
+} search_cmd_t;
+
+static const search_app_t search_apps[] = {
+    { "Terminal",        "Kabuk, komut gecmisi ve cikti",          ">_", UI_ACCENT,        UI_WIN_TERMINAL },
+    { "Dosya Gezgini",   "RamFS klasorlerinde gezinme",            "[]", VGA_YELLOW,       UI_WIN_EXPLORER },
+    { "Not Defteri",     "Metin dosyasi acma ve duzenleme",        "N",  VGA_LIGHT_CYAN,   UI_WIN_NOTEPAD },
+    { "Paint",           "Serbest cizim ve firca araclari",        "P",  VGA_LIGHT_RED,    UI_WIN_PAINT },
+    { "Mayin Tarlasi",   "9x9 klasik mayin oyunu",                 "*",  VGA_YELLOW,       UI_WIN_MINES },
+    { "Hesap Makinesi",  "Dort islem, fare ve klavye destegi",     "#",  UI_ACCENT,        UI_WIN_CALC },
+    { "Sistem Bilgisi",  "CPU, RAM, RTC ve uptime bilgileri",      "i",  UI_ACCENT,        UI_WIN_SYSINFO },
+    { "Ayarlar",         "Duvar kagidi, klavye ve tercihler",      "A",  VGA_LIGHT_GREEN,  UI_WIN_SETTINGS }
+};
+
+static const search_cmd_t search_commands[] = {
+    { "help",     "Komut listesini gosterir" },
+    { "clear",    "Terminali temizler" },
+    { "ls",       "Dizindeki dosya ve klasorleri listeler" },
+    { "cd",       "Dizini degistirir" },
+    { "pwd",      "Gecerli dizini yazdirir" },
+    { "cat",      "Dosya icerigini okur" },
+    { "mkdir",    "Yeni klasor olusturur" },
+    { "touch",    "Yeni bos dosya olusturur" },
+    { "explorer", "Dosya Gezginini acar" },
+    { "notepad",  "Not Defterini acar" },
+    { "paint",    "Paint cizim tahtasini acar" },
+    { "mines",    "Mayin Tarlasi oyununu acar" },
+    { "calc",     "Hesap Makinesini acar" },
+    { "sysinfo",  "Sistem Bilgisi penceresini acar" },
+    { "settings", "Ayarlar penceresini acar" },
+    { "ayarlar",  "Ayarlar penceresini acar" },
+    { "search",   "Yerel arama penceresini acar" },
+    { "arama",    "Yerel arama penceresini acar" },
+    { "launcher", "Baslat menusunu acar veya kapatir" },
+    { "uptime",   "Calisma suresini gosterir" },
+    { "mem",      "Bellek istatistiklerini gosterir" },
+    { "frame",    "Fiziksel kare testi yapar" },
+    { "heap",     "kmalloc ve kfree testi yapar" },
+    { "time",     "RTC tarih ve saatini gosterir" },
+    { "mouse",    "Fare konumunu gosterir" },
+    { "about",    "Sistem bilgisini gosterir" },
+    { "reboot",   "Sistemi yeniden baslatir" },
+    { "halt",     "Sistemi durdurur" }
+};
+
+static char search_query[SEARCH_QUERY_MAX + 1];
+static int  search_query_len;
+static search_result_t search_results[SEARCH_MAX_RESULTS];
+static int  search_result_count;
+static int  search_total;
+
+static void search_copy(char *dst, const char *src, int max)
+{
+    if (!dst || max <= 0) return;
+    int i = 0;
+    if (src) {
+        while (src[i] && i < max - 1) {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    dst[i] = '\0';
+}
+
+static char search_fold(unsigned char c)
+{
+    switch (c) {
+    case 0xC7: case 0xE7: return 'c';
+    case 0xD0: case 0xF0: return 'g';
+    case 0xDD: case 0xFD: return 'i';
+    case 0xD6: case 0xF6: return 'o';
+    case 0xDE: case 0xFE: return 's';
+    case 0xDC: case 0xFC: return 'u';
+    default:
+        if (c >= 'A' && c <= 'Z') return (char)(c + 32);
+        return (char)c;
+    }
+}
+
+static const char *search_find(const char *text, const char *needle)
+{
+    if (!text || !needle || !*needle) return text;
+    for (const char *p = text; *p; p++) {
+        const char *a = p;
+        const char *b = needle;
+        while (*a && *b && search_fold((unsigned char)*a) ==
+                             search_fold((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*b) return p;
+    }
+    return 0;
+}
+
+static int search_contains(const char *text, const char *needle)
+{
+    return search_find(text, needle) != 0;
+}
+
+static void search_snippet(const char *content, const char *hit,
+                           char *out, int max)
+{
+    if (!out || max <= 0) return;
+    out[0] = '\0';
+    if (!content) return;
+
+    const char *start = content;
+    if (hit && hit >= content) {
+        start = hit;
+        int back = 0;
+        while (start > content && back < 24) {
+            start--;
+            if (*start == '\n' || *start == '\r') {
+                start++;
+                break;
+            }
+            back++;
+        }
+    }
+
+    int pos = 0;
+    if (start > content && max > 8) {
+        out[pos++] = '.';
+        out[pos++] = '.';
+        out[pos++] = '.';
+        out[pos++] = ' ';
+    }
+
+    const char *p = start;
+    while (*p && pos < max - 1) {
+        if (*p == '\n' || *p == '\r') break;
+        out[pos++] = (*p == '\t') ? ' ' : *p;
+        p++;
+    }
+    while (pos > 0 && out[pos - 1] == ' ') pos--;
+
+    if (*p && *p != '\n' && *p != '\r' && pos + 4 < max) {
+        out[pos++] = '.';
+        out[pos++] = '.';
+        out[pos++] = '.';
+    }
+    out[pos] = '\0';
+}
+
+static void search_add(int type, const char *icon, uint8_t color,
+                       const char *title, const char *meta,
+                       const char *detail, const char *path, int action)
+{
+    search_total++;
+    if (search_result_count >= SEARCH_MAX_RESULTS) return;
+
+    search_result_t *r = &search_results[search_result_count++];
+    r->type = type;
+    r->action = action;
+    r->icon_color = color;
+    search_copy(r->icon, icon, sizeof(r->icon));
+    search_copy(r->title, title, sizeof(r->title));
+    search_copy(r->meta, meta, sizeof(r->meta));
+    search_copy(r->detail, detail, sizeof(r->detail));
+    search_copy(r->path, path, sizeof(r->path));
+}
+
+static void search_scan_dir(vfs_node_t *dir, const char *query)
+{
+    if (!dir) return;
+
+    for (vfs_node_t *node = dir->first_child; node; node = node->next_sibling) {
+        if (node->type == VFS_TYPE_DIR) {
+            search_scan_dir(node, query);
+            continue;
+        }
+        if (node->type != VFS_TYPE_FILE) continue;
+
+        char path[SEARCH_PATH_MAX];
+        vfs_get_path(node, path, sizeof(path));
+
+        const char *hit = 0;
+        if (node->content && node->size) {
+            hit = search_find(node->content, query);
+        }
+
+        if (!search_contains(node->name, query) &&
+            !search_contains(path, query) && !hit) {
+            continue;
+        }
+
+        char meta[SEARCH_META_MAX];
+        string_format(meta, sizeof(meta), "%s | %u bayt", path, node->size);
+
+        char detail[SEARCH_DETAIL_MAX];
+        search_snippet(node->content, hit, detail, sizeof(detail));
+        if (!detail[0]) {
+            search_copy(detail, "RamFS dosyasi", sizeof(detail));
+        }
+
+        search_add(SEARCH_TYPE_FILE, "D", VGA_LIGHT_CYAN, node->name,
+                   meta, detail, path, -1);
+    }
+}
+
+static void search_run(void)
+{
+    search_result_count = 0;
+    search_total = 0;
+
+    if (!search_query[0]) {
+        /* Bos sorguda hizli erisim kartlari. */
+        for (uint32_t i = 0; i < sizeof(search_apps) / sizeof(search_apps[0]); i++) {
+            search_add(SEARCH_TYPE_APP, search_apps[i].icon, search_apps[i].color,
+                       search_apps[i].name, "Uygulama | tikla ac",
+                       search_apps[i].detail, "", search_apps[i].win_id);
+        }
+        return;
+    }
+
+    /* 1. Uygulamalar */
+    for (uint32_t i = 0; i < sizeof(search_apps) / sizeof(search_apps[0]); i++) {
+        if (search_contains(search_apps[i].name, search_query) ||
+            search_contains(search_apps[i].detail, search_query)) {
+            search_add(SEARCH_TYPE_APP, search_apps[i].icon, search_apps[i].color,
+                       search_apps[i].name, "Uygulama | tikla ac",
+                       search_apps[i].detail, "", search_apps[i].win_id);
+        }
+    }
+
+    /* 2. RamFS dosyalari: ad, yol ve icerik */
+    search_scan_dir(vfs_get_root(), search_query);
+
+    /* 3. Kabuk komutlari */
+    for (uint32_t i = 0; i < sizeof(search_commands) / sizeof(search_commands[0]); i++) {
+        if (search_contains(search_commands[i].name, search_query) ||
+            search_contains(search_commands[i].detail, search_query)) {
+            search_add(SEARCH_TYPE_CMD, ">", UI_ACCENT, search_commands[i].name,
+                       "Komut | Terminalde calistirin",
+                       search_commands[i].detail, "", -1);
+        }
+    }
+}
+
+static void search_activate(int index)
+{
+    if (index < 0 || index >= search_result_count) return;
+
+    search_result_t *r = &search_results[index];
+    if (r->type == SEARCH_TYPE_FILE && r->path[0]) {
+        ui_notepad_open_file(r->path);
+        ui_window_open(UI_WIN_NOTEPAD);
+    } else if (r->type == SEARCH_TYPE_APP) {
+        ui_window_open(r->action);
+    } else {
+        ui_window_open(UI_WIN_TERMINAL);
+    }
+    ui_dirty = 1;
+}
+
+void ui_search_open(const char *query)
+{
+    if (query && *query) {
+        search_copy(search_query, query, SEARCH_QUERY_MAX + 1);
+        search_query_len = (int)strlen(search_query);
+        if (search_query_len > SEARCH_QUERY_MAX) {
+            search_query_len = SEARCH_QUERY_MAX;
+            search_query[search_query_len] = '\0';
+        }
+    }
+
+    ui_window_open(UI_WIN_SEARCH);
+    ui_dirty = 1;
+}
+
+/* ========================================================================= */
 /* Pencere Yonetimi                                                          */
 /* ========================================================================= */
 static void set_active_window(int win_id)
@@ -471,6 +785,9 @@ static void activate_fallback_window(int exclude)
 void ui_window_open(int win_id)
 {
     if (win_id < 0 || win_id >= UI_WIN_COUNT) return;
+    if (win_id == UI_WIN_SEARCH) {
+        search_run();
+    }
     windows[win_id].is_visible = 1;
     windows[win_id].is_minimized = 0;
     set_active_window(win_id);
@@ -555,7 +872,34 @@ int ui_handle_key(int key)
         return 1;
     }
 
-    /* 1. Not Defteri Aktifse Klavye Metin Girisi */
+    /* 1. Arama Penceresi Aktifse Sorgu Girisi */
+    if (windows[UI_WIN_SEARCH].is_visible &&
+        !windows[UI_WIN_SEARCH].is_minimized &&
+        windows[UI_WIN_SEARCH].is_active) {
+        if ((key >= 32 && key <= 126) || is_turkish_char(key)) {
+            if (search_query_len < SEARCH_QUERY_MAX) {
+                search_query[search_query_len++] = (char)key;
+                search_query[search_query_len] = '\0';
+                search_run();
+                ui_dirty = 1;
+            }
+            return 1;
+        } else if (key == '\b') {
+            if (search_query_len > 0) {
+                search_query[--search_query_len] = '\0';
+                search_run();
+                ui_dirty = 1;
+            }
+            return 1;
+        } else if (key == '\n') {
+            if (search_query[0] && search_result_count > 0) {
+                search_activate(0);
+            }
+            return 1;
+        }
+    }
+
+    /* 2. Not Defteri Aktifse Klavye Metin Girisi */
     if (windows[UI_WIN_NOTEPAD].is_visible &&
         !windows[UI_WIN_NOTEPAD].is_minimized &&
         windows[UI_WIN_NOTEPAD].is_active) {
@@ -595,7 +939,7 @@ int ui_handle_key(int key)
         }
     }
 
-    /* 2. Hesap Makinesi Aktifse Rakam & Islem */
+    /* 3. Hesap Makinesi Aktifse Rakam & Islem */
     if (windows[UI_WIN_CALC].is_visible &&
         !windows[UI_WIN_CALC].is_minimized &&
         windows[UI_WIN_CALC].is_active) {
@@ -694,6 +1038,7 @@ static void draw_window_header(window_t *win)
     else if (win->id == UI_WIN_PAINT)    { icon = "P"; icon_col = VGA_LIGHT_RED; }
     else if (win->id == UI_WIN_MINES)    { icon = "*"; icon_col = VGA_YELLOW; }
     else if (win->id == UI_WIN_SETTINGS) { icon = "A"; icon_col = VGA_LIGHT_GREEN; }
+    else if (win->id == UI_WIN_SEARCH)   { icon = "?"; icon_col = VGA_LIGHT_CYAN; }
 
     gfx_fill_rounded_rect_rgb(win->x + 7, win->y + 5, 16, 15, 3,
                               gfx_rgb(14, 18, 26));
@@ -1485,31 +1830,179 @@ static void draw_settings_content(window_t *win)
     }
 }
 
+static void search_draw_clipped(int x, int y, const char *text,
+                                uint8_t fg, int max_chars)
+{
+    char buf[64];
+    int i = 0;
+    if (max_chars > (int)sizeof(buf) - 1) max_chars = (int)sizeof(buf) - 1;
+    while (text && text[i] && i < max_chars) {
+        buf[i] = text[i];
+        i++;
+    }
+    buf[i] = '\0';
+    gfx_text(x, y, buf, fg, 0xFF);
+}
+
+static void draw_search_content(window_t *win)
+{
+    int mx, my, buttons;
+    mouse_get_state(&mx, &my, &buttons);
+
+    int x = win->x;
+    int y = win->y;
+    int field_x = x + SEARCH_PAD;
+    int field_w = win->w - 2 * SEARCH_PAD - SEARCH_BTN_W - 8;
+    int field_y = y + SEARCH_FIELD_TOP;
+    int btn_x = field_x + field_w + 8;
+
+    /* Google'a selam duran renkli yerel logo. */
+    static const char *logo = "casrev";
+    static const uint8_t logo_cols[6] = {
+        UI_ACCENT, UI_CLOSE_RED, VGA_YELLOW,
+        UI_ACCENT, UI_PROGRESS, UI_CLOSE_RED
+    };
+    int logo_x = x + (win->w - 6 * 8) / 2;
+    int logo_y = y + 36;
+    for (int i = 0; i < 6; i++) {
+        gfx_char(logo_x + i * 8, logo_y, (unsigned char)logo[i],
+                 logo_cols[i], 0xFF);
+    }
+
+    const char *subtitle = "Yerel arama motoru";
+    int sub_x = x + (win->w - (int)strlen(subtitle) * 8) / 2;
+    gfx_text(sub_x, y + 52, subtitle, VGA_DARK_GREY, 0xFF);
+
+    /* Arama alani */
+    gfx_fill_rounded_rect_rgb(field_x, field_y, field_w, SEARCH_FIELD_H, 6,
+                              gfx_rgb(28, 34, 48));
+    gfx_rect_rounded_rgb(field_x, field_y, field_w, SEARCH_FIELD_H, 6,
+                         win->is_active ? gfx_rgb(0, 150, 240)
+                                        : gfx_rgb(52, 62, 82));
+    if (search_query[0]) {
+        gfx_text(field_x + 12, field_y + 12, search_query, VGA_WHITE, 0xFF);
+        if (win->is_active && ((timer_ticks() / 50) & 1)) {
+            gfx_vline_rgb(field_x + 12 + search_query_len * 8,
+                          field_y + 9, 14, gfx_rgb(95, 205, 255));
+        }
+    } else {
+        gfx_text(field_x + 12, field_y + 12,
+                 "Dosya, uygulama veya komut ara...", VGA_DARK_GREY, 0xFF);
+    }
+
+    /* Ara butonu */
+    int btn_hover = (mx >= btn_x && mx <= btn_x + SEARCH_BTN_W &&
+                     my >= field_y && my <= field_y + SEARCH_FIELD_H);
+    gfx_fill_rounded_rect_gradient_v(btn_x, field_y, SEARCH_BTN_W,
+                                     SEARCH_FIELD_H, 5,
+                                     btn_hover ? gfx_rgb(50, 175, 250)
+                                               : gfx_rgb(32, 145, 225),
+                                     btn_hover ? gfx_rgb(0, 100, 180)
+                                               : gfx_rgb(0, 92, 165));
+    gfx_rect_rounded_rgb(btn_x, field_y, SEARCH_BTN_W, SEARCH_FIELD_H, 5,
+                         btn_hover ? gfx_rgb(130, 220, 255)
+                                   : gfx_rgb(70, 150, 210));
+    gfx_text(btn_x + 28, field_y + 12, "Ara", VGA_WHITE, 0xFF);
+
+    const char *hint = search_query[0]
+        ? "Enter: ilk sonucu ac | yazmaya devam edin"
+        : "RamFS dosyalari, uygulamalar ve kabuk komutlari";
+    int hint_x = x + (win->w - (int)strlen(hint) * 8) / 2;
+    if (hint_x < x + 20) hint_x = x + 20;
+    search_draw_clipped(hint_x, y + 112, hint, VGA_DARK_GREY, 60);
+
+    /* Sonuclar */
+    int row_x = x + 20;
+    int row_w = win->w - 40;
+
+    if (search_result_count == 0) {
+        const char *none = "Sonuc bulunamadi";
+        int nx = x + (win->w - (int)strlen(none) * 8) / 2;
+        gfx_text(nx, y + SEARCH_RESULTS_TOP + 52, none, UI_ACCENT, 0xFF);
+
+        const char *tip = "Dosya adi, icerik, uygulama veya komut deneyin.";
+        int tx = x + (win->w - (int)strlen(tip) * 8) / 2;
+        if (tx < x + 20) tx = x + 20;
+        search_draw_clipped(tx, y + SEARCH_RESULTS_TOP + 72, tip,
+                            VGA_DARK_GREY, 58);
+    } else {
+        for (int i = 0; i < search_result_count; i++) {
+            int row_y = y + SEARCH_RESULTS_TOP + i * SEARCH_ROW_H;
+            int hover = (mx >= row_x && mx <= row_x + row_w &&
+                         my >= row_y && my <= row_y + SEARCH_ROW_H - 4);
+            search_result_t *r = &search_results[i];
+
+            gfx_fill_rounded_rect_rgb(row_x, row_y, row_w, SEARCH_ROW_H - 4, 4,
+                                      hover ? gfx_rgb(36, 46, 66)
+                                            : gfx_rgb(23, 28, 39));
+            gfx_rect_rounded_rgb(row_x, row_y, row_w, SEARCH_ROW_H - 4, 4,
+                                 hover ? gfx_rgb(60, 130, 190)
+                                       : gfx_rgb(43, 53, 72));
+
+            int icon_x = row_x + 8;
+            int icon_y = row_y + 6;
+            gfx_fill_rounded_rect_rgb(icon_x, icon_y, 30, 30, 4,
+                                      gfx_rgb(15, 19, 28));
+            gfx_rect_rounded_rgb(icon_x, icon_y, 30, 30, 4, r->icon_color);
+            int ilen = (int)strlen(r->icon);
+            int itx = icon_x + (30 - ilen * 8) / 2;
+            gfx_text(itx, icon_y + 11, r->icon, r->icon_color, 0xFF);
+
+            int text_x = row_x + 48;
+            search_draw_clipped(text_x, row_y + 5, r->title, VGA_WHITE, 42);
+            search_draw_clipped(text_x, row_y + 17, r->meta, UI_ACCENT, 52);
+            search_draw_clipped(text_x, row_y + 29, r->detail,
+                                VGA_LIGHT_GREY, 52);
+        }
+    }
+
+    /* Alt durum satiri */
+    char status[80];
+    if (!search_query[0]) {
+        string_format(status, sizeof(status), "Hizli erisim | %d uygulama",
+                      search_total);
+    } else if (search_total == 0) {
+        string_format(status, sizeof(status), "Sonuc bulunamadi | yerel arama");
+    } else if (search_total > SEARCH_MAX_RESULTS) {
+        string_format(status, sizeof(status), "%d sonuc | ilk %d gosteriliyor",
+                      search_total, search_result_count);
+    } else {
+        string_format(status, sizeof(status), "%d sonuc | yerel arama",
+                      search_total);
+    }
+    search_draw_clipped(x + SEARCH_PAD, y + win->h - 20, status,
+                        VGA_DARK_GREY, 50);
+
+    const char *offline = "RamFS | internet yok";
+    int off_x = x + win->w - SEARCH_PAD - (int)strlen(offline) * 8;
+    gfx_text(off_x, y + win->h - 20, offline, VGA_DARK_GREY, 0xFF);
+}
+
 static void draw_desktop_icons(void)
 {
-    static const char *labels[8] = {
+    static const char *labels[9] = {
         "Terminal", "Gezgin", "Notlar", "Paint",
-        "Mayin", "Hesap", "Sistem", "Ayarlar"
+        "Mayin", "Hesap", "Sistem", "Arama", "Ayarlar"
     };
-    static const char *icons[8] = {
-        ">_", "[]", "N", "P", "*", "#", "i", "A"
+    static const char *icons[9] = {
+        ">_", "[]", "N", "P", "*", "#", "i", "?", "A"
     };
-    static const uint8_t colors[8] = {
+    static const uint8_t colors[9] = {
         UI_ACCENT, VGA_YELLOW, VGA_LIGHT_CYAN, VGA_LIGHT_RED,
-        VGA_YELLOW, UI_ACCENT, UI_ACCENT, VGA_LIGHT_GREEN
+        VGA_YELLOW, UI_ACCENT, UI_ACCENT, VGA_LIGHT_CYAN, VGA_LIGHT_GREEN
     };
 
     int mx, my, buttons;
     mouse_get_state(&mx, &my, &buttons);
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         int x = 18;
-        int y = 16 + i * 66;
+        int y = 12 + i * 60;
         int hover = (mx >= x && mx <= x + 48 && my >= y && my <= y + 60);
 
-        gfx_fill_rounded_rect_rgb(x, y, 48, 44, 5,
-                                  hover ? gfx_rgb(38, 48, 68)
-                                        : gfx_rgb(19, 23, 33));
+        uint16_t card_bg = hover ? gfx_rgb(38, 48, 68)
+                                 : gfx_rgb(19, 23, 33);
+        gfx_fill_rounded_rect_rgb(x, y, 48, 44, 5, card_bg);
         gfx_rect_rounded_rgb(x, y, 48, 44, 5,
                              hover ? gfx_rgb(0, 150, 240)
                                    : gfx_rgb(48, 57, 74));
@@ -1517,7 +2010,16 @@ static void draw_desktop_icons(void)
             gfx_hline_rgb(x + 6, y + 1, 36, gfx_rgb(95, 205, 255));
         }
 
-        draw_text_shadow(x + 16, y + 16, icons[i], colors[i]);
+        if (i == 7) {
+            /* Arama: cizilmis buyutec */
+            gfx_fill_circle_rgb(x + 24, y + 20, 9, VGA_LIGHT_CYAN);
+            gfx_fill_circle_rgb(x + 24, y + 20, 6, card_bg);
+            gfx_fill_rect_rgb(x + 30, y + 27, 3, 3, VGA_LIGHT_CYAN);
+            gfx_fill_rect_rgb(x + 32, y + 29, 3, 3, VGA_LIGHT_CYAN);
+            gfx_fill_rect_rgb(x + 34, y + 31, 3, 3, VGA_LIGHT_CYAN);
+        } else {
+            draw_text_shadow(x + 16, y + 16, icons[i], colors[i]);
+        }
 
         gfx_text(x + 3, y + 51, labels[i], GFX_BLACK, 0xFF);
         gfx_text(x + 2, y + 50, labels[i],
@@ -1541,7 +2043,7 @@ static int taskbar_tab_width(void)
 
     int width = (432 - (count - 1) * 4) / count;
     if (width > 68) width = 68;
-    if (width < 48) width = 48;
+    if (width < 44) width = 44;
     return width;
 }
 
@@ -1595,8 +2097,8 @@ static void draw_taskbar(void)
 
     /* Pencere Sekmeleri */
     static const char *tab_titles[UI_WIN_COUNT] = {
-        "Term", "Sistem", "Hesap", "Gezgin",
-        "Notlar", "Paint", "Mayin", "Ayar"
+        "Term", "Bilgi", "Hesap", "Dosya",
+        "Not", "Paint", "Mayin", "Ayar", "Arama"
     };
 
     int tab_x = 100;
@@ -1671,9 +2173,9 @@ static void draw_start_menu(void)
     if (!start_menu_open) return;
 
     int menu_x = 8;
-    int menu_y = 260;
+    int menu_y = 240;
     int menu_w = 224;
-    int menu_h = 298;
+    int menu_h = 322;
 
     int mx, my, buttons;
     mouse_get_state(&mx, &my, &buttons);
@@ -1691,7 +2193,8 @@ static void draw_start_menu(void)
     gfx_text(menu_x + 146, menu_y + 9, "root", VGA_LIGHT_GREY, 0xFF);
     gfx_hline_rgb(menu_x, menu_y + 30, menu_w, gfx_rgb(45, 55, 74));
 
-    static const char *items[10] = {
+    static const char *items[11] = {
+        "?  Arama (Yerel)",
         ">_ Terminal (Kabuk)",
         "[] Dosya Gezgini",
         "N  Not Defteri",
@@ -1705,8 +2208,8 @@ static void draw_start_menu(void)
     };
 
     int iy = menu_y + 36;
-    for (int i = 0; i < 10; i++) {
-        if (i == 8) {
+    for (int i = 0; i < 11; i++) {
+        if (i == 9) {
             gfx_hline_rgb(menu_x + 10, iy, menu_w - 20,
                           gfx_rgb(48, 58, 78));
             iy += 6;
@@ -1727,7 +2230,7 @@ static void draw_start_menu(void)
         }
 
         gfx_text(menu_x + 16, row_y + 6, items[i],
-                 (i >= 8) ? VGA_LIGHT_RED : VGA_WHITE, 0xFF);
+                 (i >= 9) ? VGA_LIGHT_RED : VGA_WHITE, 0xFF);
         iy += 24;
     }
 }
@@ -1765,6 +2268,7 @@ void ui_render(void)
         else if (windows[i].id == UI_WIN_PAINT) draw_paint_content(&windows[i]);
         else if (windows[i].id == UI_WIN_MINES) draw_mines_content(&windows[i]);
         else if (windows[i].id == UI_WIN_SETTINGS) draw_settings_content(&windows[i]);
+        else if (windows[i].id == UI_WIN_SEARCH) draw_search_content(&windows[i]);
     }
 
     if (active_idx >= 0) {
@@ -1777,6 +2281,7 @@ void ui_render(void)
         else if (windows[active_idx].id == UI_WIN_PAINT) draw_paint_content(&windows[active_idx]);
         else if (windows[active_idx].id == UI_WIN_MINES) draw_mines_content(&windows[active_idx]);
         else if (windows[active_idx].id == UI_WIN_SETTINGS) draw_settings_content(&windows[active_idx]);
+        else if (windows[active_idx].id == UI_WIN_SEARCH) draw_search_content(&windows[active_idx]);
     }
 
     /* 4. Alt Gorev Cubugu */
@@ -1836,22 +2341,23 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
 
     /* 2. Baslat Menusu */
     if (start_menu_open) {
-        int mx0 = 8, my0 = 260, mw0 = 224, mh0 = 298;
+        int mx0 = 8, my0 = 240, mw0 = 224, mh0 = 322;
         if (mx >= mx0 && mx <= mx0 + mw0 && my >= my0 && my <= my0 + mh0) {
             int iy = my0 + 36;
-            for (int i = 0; i < 10; i++) {
-                if (i == 8) iy += 6;
+            for (int i = 0; i < 11; i++) {
+                if (i == 9) iy += 6;
                 if (my >= iy && my <= iy + 22) {
-                    if (i == 0) ui_window_open(UI_WIN_TERMINAL);
-                    else if (i == 1) ui_window_open(UI_WIN_EXPLORER);
-                    else if (i == 2) ui_window_open(UI_WIN_NOTEPAD);
-                    else if (i == 3) ui_window_open(UI_WIN_PAINT);
-                    else if (i == 4) ui_window_open(UI_WIN_MINES);
-                    else if (i == 5) ui_window_open(UI_WIN_CALC);
-                    else if (i == 6) ui_window_open(UI_WIN_SYSINFO);
-                    else if (i == 7) ui_window_open(UI_WIN_SETTINGS);
-                    else if (i == 8) { outb(0x64, 0xFE); }
-                    else if (i == 9) { for (;;) __asm__ volatile("cli; hlt"); }
+                    if (i == 0) ui_window_open(UI_WIN_SEARCH);
+                    else if (i == 1) ui_window_open(UI_WIN_TERMINAL);
+                    else if (i == 2) ui_window_open(UI_WIN_EXPLORER);
+                    else if (i == 3) ui_window_open(UI_WIN_NOTEPAD);
+                    else if (i == 4) ui_window_open(UI_WIN_PAINT);
+                    else if (i == 5) ui_window_open(UI_WIN_MINES);
+                    else if (i == 6) ui_window_open(UI_WIN_CALC);
+                    else if (i == 7) ui_window_open(UI_WIN_SYSINFO);
+                    else if (i == 8) ui_window_open(UI_WIN_SETTINGS);
+                    else if (i == 9) { outb(0x64, 0xFE); }
+                    else if (i == 10) { for (;;) __asm__ volatile("cli; hlt"); }
                     start_menu_open = 0;
                     ui_dirty = 1;
                     return;
@@ -2119,6 +2625,38 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                         return;
                     }
                 }
+            } else if (w->id == UI_WIN_SEARCH) {
+                int field_x = w->x + SEARCH_PAD;
+                int field_w = w->w - 2 * SEARCH_PAD - SEARCH_BTN_W - 8;
+                int field_y = w->y + SEARCH_FIELD_TOP;
+                int btn_x = field_x + field_w + 8;
+
+                /* Arama alani: pencere zaten aktif, imlec gorunur. */
+                if (mx >= field_x && mx <= field_x + field_w &&
+                    my >= field_y && my <= field_y + SEARCH_FIELD_H) {
+                    ui_dirty = 1;
+                    return;
+                }
+
+                /* Ara butonu */
+                if (mx >= btn_x && mx <= btn_x + SEARCH_BTN_W &&
+                    my >= field_y && my <= field_y + SEARCH_FIELD_H) {
+                    search_run();
+                    ui_dirty = 1;
+                    return;
+                }
+
+                /* Sonuc satirlari */
+                int row_x = w->x + 20;
+                int row_w = w->w - 40;
+                for (int r = 0; r < search_result_count; r++) {
+                    int row_y = w->y + SEARCH_RESULTS_TOP + r * SEARCH_ROW_H;
+                    if (mx >= row_x && mx <= row_x + row_w &&
+                        my >= row_y && my <= row_y + SEARCH_ROW_H - 4) {
+                        search_activate(r);
+                        return;
+                    }
+                }
             } else if (w->id == UI_WIN_MINES) {
                 int min_x = w->x + 16;
                 int min_y = w->y + 32;
@@ -2163,14 +2701,15 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
 
     /* 5. Masaustu Simgelerine Tiklandi mi? */
     if (mx >= 18 && mx <= 66) {
-        if (my >= 16 && my <= 66) { ui_window_open(UI_WIN_TERMINAL); return; }
-        if (my >= 82 && my <= 132) { ui_window_open(UI_WIN_EXPLORER); return; }
-        if (my >= 148 && my <= 198) { ui_window_open(UI_WIN_NOTEPAD); return; }
-        if (my >= 214 && my <= 264) { ui_window_open(UI_WIN_PAINT); return; }
-        if (my >= 280 && my <= 330) { ui_window_open(UI_WIN_MINES); return; }
-        if (my >= 346 && my <= 396) { ui_window_open(UI_WIN_CALC); return; }
-        if (my >= 412 && my <= 462) { ui_window_open(UI_WIN_SYSINFO); return; }
-        if (my >= 478 && my <= 528) { ui_window_open(UI_WIN_SETTINGS); return; }
+        if (my >= 12 && my <= 56) { ui_window_open(UI_WIN_TERMINAL); return; }
+        if (my >= 72 && my <= 116) { ui_window_open(UI_WIN_EXPLORER); return; }
+        if (my >= 132 && my <= 176) { ui_window_open(UI_WIN_NOTEPAD); return; }
+        if (my >= 192 && my <= 236) { ui_window_open(UI_WIN_PAINT); return; }
+        if (my >= 252 && my <= 296) { ui_window_open(UI_WIN_MINES); return; }
+        if (my >= 312 && my <= 356) { ui_window_open(UI_WIN_CALC); return; }
+        if (my >= 372 && my <= 416) { ui_window_open(UI_WIN_SYSINFO); return; }
+        if (my >= 432 && my <= 476) { ui_window_open(UI_WIN_SEARCH); return; }
+        if (my >= 492 && my <= 536) { ui_window_open(UI_WIN_SETTINGS); return; }
     }
 }
 
@@ -2203,6 +2742,7 @@ void ui_init(void)
     rtc_format_time(clock_text);
     paint_init();
     mines_init_game();
+    search_run();
 
     int mx, my, buttons;
     mouse_get_state(&mx, &my, &buttons);

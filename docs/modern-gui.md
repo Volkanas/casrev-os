@@ -12,7 +12,7 @@ Bu belge, casrev-os v0.9'daki 16-bit masaüstü mimarisini ve görsel katmanı �
   (1,5 MB, `.bss`). Tüm UI çizimi burada yapılır; `gfx_flush()` yalnızca
   görünen 800×600 bölümü satır satır LFB'ye kopyalar.
 - **UI:** `src/kernel/ui.c` içinde masaüstü, pencereler, görev çubuğu, Başlat
-  menüsü, duvar kağıtları ve uygulama içerikleri.
+  menüsü, duvar kağıtları, yerel Arama ve uygulama içerikleri.
 - **Girdi:** PS/2 klavye (IRQ1) ve fare (IRQ12); `shell_run()` döngüsü
   `ui_poll()` + `keyboard_getchar()` ile olayları işler.
 - **Yenileme:** UI yalnızca kirli bayrak set edildiğinde yeniden çizilir.
@@ -107,7 +107,7 @@ RGB gradyanıdır; iki yarım parça hâlinde `gfx_gradient_v()` ile çizilir:
 - Açık pencereler için sekmeler: aktif sekme mavi kenarlıklı ve üst ışıklı,
   hover'da açılır, pasifte koyu kalır.
 - Başlat menüsü `alpha=238` yarı saydam panel, yumuşak gölge, gradyan başlık
-  ve hover'da vurgulanan sekiz uygulama satırı içerir.
+  ve hover'da vurgulanan dokuz uygulama satırı içerir.
 - Sistem tepsisi canlı PMM RAM kullanımını (`RAM: X/31M`), fare koordinatlarını
   ve RTC saatini gösterir.
 
@@ -120,7 +120,35 @@ RGB gradyanıdır; iki yarım parça hâlinde `gfx_gradient_v()` ile çizilir:
 5. Mayın Tarlası — 9×9 oyun tahtası ve bayrak koyma.
 6. Hesap Makinesi — fare ve klavye ile dört işlem.
 7. Sistem Bilgisi — tick, uptime, RTC, RAM çubuğu.
-8. Ayarlar — duvar kağıdı, klavye bilgisi, kısayollar, canlı sistem durumu.
+8. Arama — Google görünümlü, çevrimdışı yerel arama.
+9. Ayarlar — duvar kağıdı, klavye bilgisi, kısayollar, canlı sistem durumu.
+
+## Yerel Arama
+
+Arama uygulaması, gerçek bir tarayıcı yerine işletim sisteminin kendi verileri
+üzerinde çalışan çevrimdışı bir arama motorudur. Pencere `140,50` konumunda
+`520×420` boyutundadır; başlıkta renkli `casrev` logosu, altında arama alanı ve
+`Ara` butonu bulunur.
+
+- **Aranan kaynaklar (öncelik sırasıyla):**
+  1. Uygulama adı ve açıklaması (Terminal, Ayarlar, Not Defteri, ...).
+  2. RamFS dosyaları: dosya adı, tam yol ve dosya içeriği.
+  3. Kabuk komutları: komut adı ve açıklaması (`help`, `settings`, `arama`, ...).
+- **Eşleştirme:** `search_fold()` Türkçe karakterleri ASCII karşılıklarına
+  katlar ve büyük/küçük harf duyarsız alt dizi araması yapar. Böylece `gorev`,
+  `Görev` ve `GOREV` aynı sonucu bulur.
+- **Sonuçlar:** En fazla beş satır gösterilir. Her satırda renkli ikon, başlık,
+  tür/yol bilgisi ve dosyalar için içerikten tek satırlık bağlam özeti yer alır.
+  Alt durum çubuğu toplam sonuç sayısını ve `RamFS | internet yok` bilgisini
+  gösterir.
+- **Boş sorgu:** Hızlı erişim kartları olarak ilk beş uygulama listelenir.
+- **Eylemler:** Dosya sonucu Not Defterinde açılır; uygulama sonucu ilgili
+  pencereyi öne getirir; komut sonucu Terminali etkinleştirir. `Enter` ilk
+  sonucu açar, `Backspace` sorguyu düzenler.
+- **Kabuktan:** `search [sorgu]` veya `arama [sorgu]` komutu pencereyi isteğe
+  bağlı hazır sorguyla açar.
+- **Ağ yok:** NIC, IP, DNS, HTTP veya TLS katmanı yoktur; arama tamamen yerel
+  RamFS ve çekirdek içi tablolar üzerinde çalışır.
 
 ## Türkçe-Q klavye
 
@@ -149,9 +177,13 @@ RGB gradyanıdır; iki yarım parça hâlinde `gfx_gradient_v()` ile çizilir:
 - `scripts/test-settings.ps1`: Ayarlar simgesi, duvar kağıdı seçimi, büyütme,
   çift tıklama ile geri yükleme, küçültme, görev çubuğu, Başlat menüsü ve
   hover'ı, sekiz uygulama açıkken sekme yerleşimi ve Türkçe karakter yazımı.
-- Ekran görüntüleri `build/settings-*.png`, `build/gui.png` ve
-  `docs/stage10.png` olarak saklanır; QEMU `screendump` çıktısı
-  `build/ppm2png.py` ile PNG'ye çevrilir.
+- `scripts/test-search.ps1`: masaüstü Arama simgesi, boş sorgu hızlı erişimi,
+  `gorev` ile RamFS dosyası ve Not Defteri, `ayar` ile Ayarlar uygulaması,
+  `help` ile kabuk komutu sonucu ve Terminalin öne gelmesi.
+- Ekran görüntüleri `build/settings-*.png`, `build/search-*.png`,
+  `build/gui.png` ve belge görselleri `docs/stage10.png` ile `docs/arama.png`
+  olarak saklanır; QEMU `screendump` çıktısı `build/ppm2png.py` ile PNG'ye
+  çevrilir.
 
 ## Gelecek çalışmalar
 

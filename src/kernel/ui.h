@@ -12,7 +12,8 @@
 #define UI_WIN_PAINT    5
 #define UI_WIN_MINES    6
 #define UI_WIN_SETTINGS 7
-#define UI_WIN_COUNT    8
+#define UI_WIN_SEARCH   8
+#define UI_WIN_COUNT    9
 
 void ui_init(void);
 void ui_poll(void);
@@ -31,5 +32,8 @@ int  ui_handle_key(int key);
 
 /* Not Defteri icin dosya yukleme */
 void ui_notepad_open_file(const char *path);
+
+/* Yerel arama penceresini istege bagli sorguyla acar */
+void ui_search_open(const char *query);
 
 #endif
