@@ -13,7 +13,8 @@
 #define UI_WIN_MINES    6
 #define UI_WIN_SETTINGS 7
 #define UI_WIN_SEARCH   8
-#define UI_WIN_COUNT    9
+#define UI_WIN_BROWSER  9
+#define UI_WIN_COUNT    10
 
 void ui_init(void);
 void ui_poll(void);

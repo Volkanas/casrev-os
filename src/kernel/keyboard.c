@@ -142,6 +142,18 @@ void keyboard_handler(void)
             altgr = 1;
         } else if (scancode == 0xB8) {
             altgr = 0;
+        } else if (!(scancode & 0x80)) {
+            unsigned char special = 0;
+            switch (scancode) {
+            case 0x48: special = KEY_UP; break;
+            case 0x50: special = KEY_DOWN; break;
+            case 0x49: special = KEY_PGUP; break;
+            case 0x51: special = KEY_PGDN; break;
+            case 0x47: special = KEY_HOME; break;
+            case 0x4F: special = KEY_END; break;
+            default: break;
+            }
+            if (special) buffer_push(special);
         }
         return;
     }

@@ -25,6 +25,10 @@ $shots = @(
     'search-online-results',
     'search-online-detail',
     'search-online-back',
+    'search-online-page-loading',
+    'search-online-page',
+    'search-online-page-scroll',
+    'search-online-page-back',
     'search-online-mixed',
     'search-online-mixed-detail'
 )
@@ -59,6 +63,7 @@ $qemuProc  = $null
 $client    = $null
 $failure   = $null
 $webOk     = $false
+$pageOk    = $false
 $mixedOk   = $false
 
 try {
@@ -205,6 +210,42 @@ try {
     Start-Sleep -Milliseconds 400
     Screenshot 'search-online-back'
 
+    # Ayni web sonucunu tekrar ac ve sayfa metnini yukle.
+    Click-At 300 200
+    Start-Sleep -Milliseconds 400
+
+    # "Sayfayi Ac" dugmesi: 520 genis arama penceresinde (504, 366).
+    Click-At 504 366
+    Start-Sleep -Milliseconds 250
+    Screenshot 'search-online-page-loading'
+
+    $pageDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $pageDeadline) {
+        if (Test-Path $agentLog) {
+            $agentText = Get-Content $agentLog -Raw
+            if ($agentText -match 'sayfa \d+: [1-9]\d* satir gonderildi') {
+                $pageOk = $true
+                break
+            }
+            if ($agentText -match 'sayfa \d+ basarisiz') { break }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    # Ajan satirlari TCP'ye birakir; misafir UART'tan ~2 sn'de okur.
+    Start-Sleep -Milliseconds 4000
+    Screenshot 'search-online-page'
+
+    # PgDn ile sayfa metnini kaydir.
+    Send-Key 'pgdn'
+    Start-Sleep -Milliseconds 500
+    Screenshot 'search-online-page-scroll'
+
+    # Web okuyucudan arama listesine don.
+    Click-At 94 99
+    Start-Sleep -Milliseconds 600
+    Screenshot 'search-online-page-back'
+
     # Ikinci sorgu: "ayar" ile 3 yerel + 2 web satiri ayni listede.
     for ($i = 0; $i -lt 5; $i++) { Send-Key 'backspace' }
     Send-Text 'ayar'
@@ -268,8 +309,11 @@ if ($failure) { throw $failure }
 if (-not $webOk) {
     throw 'Internet arama sonucu alinamadi. Ajan ve ag baglantisini kontrol edin.'
 }
+if (-not $pageOk) {
+    throw 'Sayfa metni alinamadi. Ajan ve sayfa baglantisini kontrol edin.'
+}
 if (-not $mixedOk) {
     throw 'Yerel + internet birlesik sonucu alinamadi.'
 }
 
-Write-Host 'Internet arama testi basarili: web sonucu, detay karti ve birlesik liste dogrulandi.'
+Write-Host 'Internet arama testi basarili: web sonucu, detay karti, sayfa metni ve birlesik liste dogrulandi.'

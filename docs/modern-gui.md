@@ -12,7 +12,7 @@ Bu belge, casrev-os v0.9'daki 16-bit masaüstü mimarisini ve görsel katmanı �
   (1,5 MB, `.bss`). Tüm UI çizimi burada yapılır; `gfx_flush()` yalnızca
   görünen 800×600 bölümü satır satır LFB'ye kopyalar.
 - **UI:** `src/kernel/ui.c` içinde masaüstü, pencereler, görev çubuğu, Başlat
-  menüsü, duvar kağıtları, yerel + internet Arama ve uygulama içerikleri.
+  menüsü, duvar kağıtları, yerel + internet Arama ve Web Okuyucu.
 - **Girdi:** PS/2 klavye (IRQ1) ve fare (IRQ12); `shell_run()` döngüsü
   `ui_poll()` + `keyboard_getchar()` ile olayları işler.
 - **Yenileme:** UI yalnızca kirli bayrak set edildiğinde yeniden çizilir.
@@ -123,6 +123,9 @@ RGB gradyanıdır; iki yarım parça hâlinde `gfx_gradient_v()` ile çizilir:
 8. Arama — Google görünümlü; yerel kaynaklar ve anonim internet sonuçları.
 9. Ayarlar — duvar kağıdı, klavye bilgisi, kısayollar, canlı sistem durumu.
 
+> Web Okuyucu ayrı bir Başlat menüsü uygulaması değildir; Arama
+> sonucundaki `Sayfayı Aç` düğmesiyle açılan yardımcı penceredir.
+
 ## Arama (yerel + internet)
 
 Arama uygulaması, RamFS ve çekirdek içi tabloları tarayan yerel arama ile
@@ -143,9 +146,10 @@ logosu, altında arama alanı ve `Ara` butonu bulunur.
 - **Boş sorgu:** Hızlı erişim kartları olarak ilk beş uygulama listelenir.
 - **Eylemler:** Dosya sonucu Not Defterinde açılır; uygulama sonucu ilgili
   pencereyi öne getirir; komut sonucu Terminali etkinleştirir. Web sonucu
-  `WEB SONUCU` kartını açar: başlık, site, URL, özet ve `Geri` düğmesi.
-  `Enter` ilk sonucu açar, `Backspace` sorguyu düzenler; detay kartı açıkken
-  `Enter` veya `Geri` kapatır.
+  `WEB SONUCU` kartını açar: başlık, site, URL, özet, `Geri` ve `Sayfayı Aç`
+  düğmeleri. `Enter` listede ilk sonucu açar; detay kartı açıkken `Enter`
+  sayfayı Web Okuyucuda açar, `Backspace` kartı kapatır. `Backspace` normal
+  listede sorguyu düzenler.
 - **Durum çubuğu:** Solda toplam/yerel/web sonuç sayısı, sağda
   `Internet: hazir`, `Internet: araniyor`, `Internet: sonuc yok`,
   `Internet: hata` veya `Internet: yok` durumu renkli gösterilir.
@@ -155,6 +159,32 @@ logosu, altında arama alanı ve `Ara` butonu bulunur.
 - **Kabuktan:** `search [sorgu]` veya `arama [sorgu]` komutu pencereyi isteğe
   bağlı hazır sorguyla açar.
 
+## Web Okuyucu
+
+Arama sonucundaki `Sayfayı Aç` düğmesi, sayfayı host ajanına indirtir ve
+misafirde `50,24` konumunda `700×520` boyutunda `Web Okuyucu` penceresini
+açar. Pencere başlığında `W` simgesi, üst bölümde sayfa başlığı, site ve URL
+bulunur.
+
+- **Araç çubuğu:** `Arama` düğmesi arama listesine döner; `Yenile` aynı URL'yi
+  yeniden ister. Sağ tarafta `Sayfa yukleniyor`, `Sayfa aliniyor N/M`,
+  `Internet: hazir | N satir` veya `Internet: hata` durumu gösterilir.
+- **Metin paneli:** Satır türleri paragraf (açık gri), başlık (beyaz, solunda
+  mavi şerit), madde (önünde `-`), alıntı (camgöbeği, önünde `|`) ve boşluk
+  olarak çizilir. Metin 8×8 fontla, satır başına en fazla 80 karakter ve
+  420 satırla sınırlıdır.
+- **Kaydırma:** Sağdaki yukarı/aşağı okları ve kaydırma çubuğu rayı fareyle
+  kullanılır; klavyeden `PgUp`/`PgDn`, `↑`/`↓`, `Home`/`End` çalışır. Alt bilgi
+  satırında görünen aralık (`Satir 32-62 / 420`) ve toplam satır sayısı yazar.
+- **Dönüş:** `Arama`, `Enter` veya `Backspace` arama penceresini öne getirir;
+  sayfa arka planda açık kalır.
+- **Hata/boş durum:** Sayfa getirilemezse panelde hata mesajı ve `Yenile`
+  ipucu gösterilir. Sayfa metni yoksa `Sayfa metni bulunamadi` yazar.
+- **Sınırlar:** Okuyucu HTML/CSS/JavaScript çalıştırmaz, görsel ve form
+  göstermez; yalnızca `ReadablePageParser` ile ayıklanan okunabilir metni
+  çizer. Sayfa içi bağlantılar takip edilmez. Tam tarayıcı için native
+  NIC/TCP/TLS yığını yol haritasındadır.
+
 ## İnternet arama köprüsü
 
 Misafir işletim sisteminde NIC sürücüsü, ARP/IP, DNS, TCP veya TLS yoktur.
@@ -163,11 +193,13 @@ devredilir; misafir yalnızca COM2 seri hattını kullanır.
 
 ```
 casrev-os (guest)                    host
-┌──────────────────┐   COM2 TCP     ┌──────────────────────────┐
-│ ui.c search_run  │ 127.0.0.1:5568 │ scripts/search-agent.py  │
-│ serial2_write  ──┼───────────────►│ DuckDuckGo HTML          │
-│ serial2_read   ◄─┼────────────────│ Wikipedia API (yedek)    │
-└──────────────────┘   Q/R/T/END    └──────────────────────────┘
+┌────────────────────┐  COM2 TCP     ┌────────────────────────────┐
+│ ui.c Arama /       │ 127.0.0.1:5568│ scripts/search-agent.py    │
+│ Web Okuyucu        │               │ DuckDuckGo HTML            │
+│ serial2_write    ──┼──────────────►│ Wikipedia API (yedek)      │
+│ serial2_read     ◄─┼───────────────│ ReadablePageParser         │
+└────────────────────┘ Q/R/T/END     └────────────────────────────┘
+                       P/G/B/Z/X
 ```
 
 - **QEMU:** `scripts/run.ps1` ajanı gizli pencerede başlatır ve ikinci seri
@@ -180,21 +212,33 @@ casrev-os (guest)                    host
   | Misafir → host | `Q\t<id>\t<sorgu>\n` | Yeni arama isteği |
   | Host → misafir | `R\t<id>\t<sayı>\n` | Sonuç sayısı |
   | Host → misafir | `T\t<başlık>\t<site>\t<URL>\t<özet>\n` | Bir web sonucu |
-  | Host → misafir | `END\t<id>\n` | Yanıt bitti |
+  | Host → misafir | `END\t<id>\n` | Arama yanıtı bitti |
   | Host → misafir | `E\t<id>\t<mesaj>\n` | Arama hatası |
+  | Misafir → host | `P\t<id>\t<URL>\n` | Sayfa metni isteği |
+  | Host → misafir | `G\t<id>\t<satır>\t<başlık>\t<site>\t<URL>\n` | Sayfa başlığı ve satır sayısı |
+  | Host → misafir | `B\t<id>\t<tür>\t<metin>\n` | Sayfa satırı (0 paragraf, 1 başlık, 2 madde, 3 alıntı, 4 boşluk, 5 not) |
+  | Host → misafir | `Z\t<id>\n` | Sayfa aktarımı bitti |
+  | Host → misafir | `X\t<id>\t<mesaj>\n` | Sayfa hatası |
 
-- **Zamanlama:** Tuş vuruşları 400 ms debounce edilir; yanıt 8 saniye içinde
-  gelmezse UI `Internet: hata` durumuna geçer ve yerel sonuçlara döner.
+- **Zamanlama:** Arama tuş vuruşları 400 ms debounce edilir; arama yanıtı
+  8 saniye içinde gelmezse UI `Internet: hata` durumuna geçer ve yerel
+  sonuçlara döner. Sayfa getirme 8 saniye, misafir sayfa aktarımı 20 saniye
+  ile sınırlıdır. Satırlar akarken UI, UART FIFO'sunu kısa süreliğine
+  kesintisiz boşaltır; böylece 420 satırlık bir sayfa birkaç saniyede
+  tamamlanır.
 - **Ajan:** DuckDuckGo `html.duckduckgo.com/html/?q=...` sayfasını ayrıştırır;
   yeterli sonuç yoksa Türkçe ve İngilizce Wikipedia API'sine düşer. Hesap,
   API anahtarı ve çerez kullanmaz. Başlık 76, site 36, URL 156, özet 136
-  karaktere sınırlanır; sekmeler ve kontrol karakterleri temizlenir.
-- **Gizlilik:** Sorgu yalnızca host üzerinden arama motoruna gider; COM2
-  bağlantısı `127.0.0.1` ile sınırlıdır. Ajan kalıcı kimlik veya arama geçmişi
-  tutmaz.
-- **Sınırlar:** Web sonucu sayfası tarayıcıda açılmaz; yalnızca başlık, site,
-  URL ve özet gösterilir. Gerçek sayfa çizimi, native NIC/TCP/TLS yığını ve
-  kalıcı çerezler bu sürümün kapsamı dışındadır.
+  karaktere sınırlanır; sekmeler ve kontrol karakterleri temizlenir. Sayfa
+  isteğinde HTML `ReadablePageParser` ile başlık, paragraf, başlık, madde ve
+  alıntılara ayrılır; 640 KB indirme, 8 saniye getirme, 420 satır ve satır
+  başına 80 karakter sınırı uygulanır.
+- **Gizlilik:** Sorgu ve sayfa isteği yalnızca host üzerinden hedef siteye
+  gider; COM2 bağlantısı `127.0.0.1` ile sınırlıdır. Ajan kalıcı kimlik veya
+  arama geçmişi tutmaz.
+- **Sınırlar:** Web Okuyucu metin tabanlıdır; CSS düzeni, JavaScript, görsel,
+  form ve sayfa içi bağlantılar gösterilmez. Tam sayfa tarayıcı, native
+  NIC/TCP/TLS yığını ve kalıcı çerezler bu sürümün kapsamı dışındadır.
 - **Kapalı mod:** `scripts/run.ps1 -NoInternet` ajanı ve COM2'yi devre dışı
   bırakır; uygulama yalnızca yerel aramayla çalışır.
 
@@ -231,13 +275,15 @@ casrev-os (guest)                    host
 - `scripts/test-search-online.ps1`: Python ajanını başlatır, QEMU'ya COM2
   ekler, gerçek `Linux` sorgusunu DuckDuckGo üzerinden çalıştırır; web
   satırlarını, `WEB SONUCU` detay kartını ve `Geri` düğmesini doğrular.
-  Ardından `ayar` sorgusuyla üç yerel + iki web satırını aynı listede gösterip
-  birleşik görünümü ve web detay kartını kaydeder.
+  `Sayfayı Aç` ile Web Okuyucunun sayfa metnini eksiksiz aldığını,
+  kaydırıldığını ve `Arama` ile listeye dönüldüğünü ekran görüntüleriyle
+  kaydeder. Ardından `ayar` sorgusuyla üç yerel + iki web satırını aynı listede
+  gösterip birleşik görünümü ve web detay kartını kaydeder.
 - Ekran görüntüleri `build/settings-*.png`, `build/search-*.png`,
   `build/search-online-*.png`, `build/gui.png` ve belge görselleri
-  `docs/stage10.png`, `docs/arama.png` ile `docs/arama-online.png`
-  olarak saklanır; QEMU `screendump` çıktısı `build/ppm2png.py` ile PNG'ye
-  çevrilir.
+  `docs/stage10.png`, `docs/arama.png`, `docs/arama-online.png` ile
+  `docs/arama-okuyucu.png` olarak saklanır; QEMU `screendump` çıktısı
+  `build/ppm2png.py` ile PNG'ye çevrilir.
 
 ## Gelecek çalışmalar
 

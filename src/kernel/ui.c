@@ -54,7 +54,8 @@ static window_t windows[UI_WIN_COUNT] = {
     { UI_WIN_PAINT,    "Paint / Cizim",      180,  50, 420, 350, 0, 0, 0, 0, 0, 0, 0, 0 },
     { UI_WIN_MINES,    "Mayin Tarlasi",      260,  60, 260, 320, 0, 0, 0, 0, 0, 0, 0, 0 },
     { UI_WIN_SETTINGS, "Ayarlar",            300,  80, 380, 330, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { UI_WIN_SEARCH,   "Arama",              140,  50, 520, 420, 0, 0, 0, 0, 0, 0, 0, 0 }
+    { UI_WIN_SEARCH,   "Arama",              140,  50, 520, 420, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { UI_WIN_BROWSER,  "Web Okuyucu",         50,  24, 700, 520, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
 /* Masaustu duvar kagidi: 0=Gece, 1=Okyanus, 2=Gun Batimi, 3=Klasik */
@@ -475,6 +476,15 @@ void ui_term_putc(char c)
 #define SEARCH_NET_LINE_MAX 512
 #define SEARCH_NET_TIMEOUT  800   /* 8 saniye (100 Hz) */
 
+#define PAGE_LINE_MAX      96
+#define PAGE_MAX_LINES     420
+#define PAGE_TIMEOUT       2000  /* 20 saniye (100 Hz) */
+
+#define PAGE_STATE_OFF     0
+#define PAGE_STATE_LOADING 1
+#define PAGE_STATE_READY   2
+#define PAGE_STATE_ERROR   3
+
 typedef struct {
     int type;
     int action;
@@ -563,6 +573,21 @@ static uint32_t search_net_wait_start;
 static char     search_net_line[SEARCH_NET_LINE_MAX];
 static int      search_net_line_len;
 static int      search_detail = -1;
+
+/* Web okuyucu: COM2'den gelen sayfa basligi ve satir tabanli metin. */
+static char     page_title[SEARCH_TITLE_MAX];
+static char     page_site[SEARCH_META_MAX];
+static char     page_url[SEARCH_PATH_MAX];
+static char     page_message[80];
+static char     page_lines[PAGE_MAX_LINES][PAGE_LINE_MAX];
+static uint8_t  page_line_kinds[PAGE_MAX_LINES];
+static int      page_line_count;
+static int      page_expected_lines;
+static int      page_state = PAGE_STATE_OFF;
+static int      page_seq;
+static int      page_req_id = -1;
+static uint32_t page_wait_start;
+static int      page_scroll;
 
 static void search_copy(char *dst, const char *src, int max)
 {
@@ -797,11 +822,148 @@ static int search_net_split(char *line, char **fields, int max)
     return count;
 }
 
+static void page_handle_line(char **fields, int count);
+
+static void page_send_request(const char *url)
+{
+    page_seq++;
+    page_req_id = page_seq;
+    page_line_count = 0;
+    page_expected_lines = 0;
+    page_scroll = 0;
+    page_message[0] = '\0';
+    page_state = PAGE_STATE_LOADING;
+    page_wait_start = timer_ticks();
+
+    if (!serial2_present()) {
+        page_state = PAGE_STATE_ERROR;
+        search_copy(page_message, "Internet baglantisi yok", sizeof(page_message));
+        page_req_id = -1;
+        ui_dirty = 1;
+        return;
+    }
+
+    char line[SEARCH_PATH_MAX + 24];
+    string_format(line, sizeof(line), "P\t%d\t%s\n", page_req_id, url ? url : "");
+    serial2_write(line);
+    ui_dirty = 1;
+}
+
+static void page_open_result(int index)
+{
+    if (index < 0 || index >= search_result_count) return;
+
+    search_result_t *r = &search_results[index];
+    if (r->type != SEARCH_TYPE_NET) return;
+
+    search_copy(page_title, r->title, sizeof(page_title));
+    const char *site = r->meta;
+    for (int i = 0; site[i]; i++) {
+        if (site[i] == '|' && site[i + 1] == ' ') {
+            site += i + 2;
+            break;
+        }
+    }
+    search_copy(page_site, site, sizeof(page_site));
+    search_copy(page_url, r->path, sizeof(page_url));
+    search_detail = -1;
+
+    page_send_request(page_url);
+    ui_window_open(UI_WIN_BROWSER);
+}
+
+static void page_reload(void)
+{
+    if (page_url[0]) {
+        page_send_request(page_url);
+    }
+}
+
+static int page_visible_lines(void)
+{
+    int panel_h = windows[UI_WIN_BROWSER].h - 122;
+    int lines = (panel_h - 20) / 12;
+    if (lines < 1) lines = 1;
+    return lines;
+}
+
+static void page_clamp_scroll(void)
+{
+    int max = page_line_count - page_visible_lines();
+    if (max < 0) max = 0;
+    if (page_scroll > max) page_scroll = max;
+    if (page_scroll < 0) page_scroll = 0;
+}
+
+static void page_scroll_by(int delta)
+{
+    page_scroll += delta;
+    page_clamp_scroll();
+    ui_dirty = 1;
+}
+
+static void page_scroll_to(int line)
+{
+    page_scroll = line;
+    page_clamp_scroll();
+    ui_dirty = 1;
+}
+
+static void page_handle_line(char **fields, int count)
+{
+    if (count < 2) return;
+
+    int id = search_net_parse_int(fields[1]);
+    if (id != page_req_id || page_req_id < 0) return;
+
+    if (strcmp(fields[0], "G") == 0 && count >= 6) {
+        page_expected_lines = search_net_parse_int(fields[2]);
+        if (page_expected_lines < 0) page_expected_lines = 0;
+        search_copy(page_title, fields[3], sizeof(page_title));
+        search_copy(page_site, fields[4], sizeof(page_site));
+        search_copy(page_url, fields[5], sizeof(page_url));
+        page_line_count = 0;
+        page_scroll = 0;
+        page_state = PAGE_STATE_LOADING;
+        ui_dirty = 1;
+    } else if (strcmp(fields[0], "B") == 0 && count >= 4) {
+        if (page_line_count < PAGE_MAX_LINES) {
+            int kind = search_net_parse_int(fields[2]);
+            if (kind < 0 || kind > 5) kind = 0;
+            search_copy(page_lines[page_line_count], fields[3], PAGE_LINE_MAX);
+            page_line_kinds[page_line_count] = (uint8_t)kind;
+            page_line_count++;
+            if ((page_line_count & 31) == 0) ui_dirty = 1;
+        }
+    } else if (strcmp(fields[0], "Z") == 0) {
+        page_state = PAGE_STATE_READY;
+        if (page_expected_lines < page_line_count) {
+            page_expected_lines = page_line_count;
+        }
+        page_req_id = -1;
+        page_clamp_scroll();
+        ui_dirty = 1;
+    } else if (strcmp(fields[0], "X") == 0 && count >= 3) {
+        page_state = PAGE_STATE_ERROR;
+        search_copy(page_message, fields[2], sizeof(page_message));
+        page_req_id = -1;
+        ui_dirty = 1;
+    }
+}
+
 static void search_net_handle_line(char *line)
 {
     char *fields[6];
     int count = search_net_split(line, fields, 6);
     if (count < 1) return;
+
+    if (count >= 2 && (strcmp(fields[0], "G") == 0 ||
+                       strcmp(fields[0], "B") == 0 ||
+                       strcmp(fields[0], "Z") == 0 ||
+                       strcmp(fields[0], "X") == 0)) {
+        page_handle_line(fields, count);
+        return;
+    }
 
     if (strcmp(fields[0], "R") == 0 && count >= 3) {
         int id = search_net_parse_int(fields[1]);
@@ -868,6 +1030,31 @@ static void search_net_send(void)
     search_net_wait_start = timer_ticks();
 }
 
+static void search_net_consume(int c)
+{
+    if (c == '\n') {
+        search_net_line[search_net_line_len] = '\0';
+        if (search_net_line_len > 0) {
+            search_net_handle_line(search_net_line);
+        }
+        search_net_line_len = 0;
+    } else if (c != '\r') {
+        if (search_net_line_len < SEARCH_NET_LINE_MAX - 1) {
+            search_net_line[search_net_line_len++] = (char)c;
+        } else {
+            search_net_line_len = 0;   /* asiri uzun satiri at */
+        }
+    }
+}
+
+static void search_net_drain(void)
+{
+    int c;
+    while ((c = serial2_read()) >= 0) {
+        search_net_consume(c);
+    }
+}
+
 static void search_poll_net(void)
 {
     if (!serial2_present()) {
@@ -877,23 +1064,28 @@ static void search_poll_net(void)
             search_merge_results();
             ui_dirty = 1;
         }
+        if (page_state == PAGE_STATE_LOADING) {
+            page_state = PAGE_STATE_ERROR;
+            page_req_id = -1;
+            search_copy(page_message, "Internet baglantisi yok", sizeof(page_message));
+            ui_dirty = 1;
+        }
         return;
     }
 
-    int c;
-    while ((c = serial2_read()) >= 0) {
-        if (c == '\n') {
-            search_net_line[search_net_line_len] = '\0';
-            if (search_net_line_len > 0) {
-                search_net_handle_line(search_net_line);
-            }
-            search_net_line_len = 0;
-        } else if (c != '\r') {
-            if (search_net_line_len < SEARCH_NET_LINE_MAX - 1) {
-                search_net_line[search_net_line_len++] = (char)c;
-            } else {
-                search_net_line_len = 0;   /* asiri uzun satiri at */
-            }
+    search_net_drain();
+
+    /*
+     * Sayfa satirlari akarken UART FIFO'sunu kisa bir sure bosaltmadan
+     * beklersek aktarim 100 Hz'lik zamanlayiciya takilir. Sayfa gelirken
+     * en fazla iki tick boyunca kesintisiz oku; boylece 420 satir saniyeler
+     * yerine ~2 saniyede tamamlanir.
+     */
+    if (page_state == PAGE_STATE_LOADING && page_expected_lines > 0) {
+        uint32_t deadline = timer_ticks() + 2;
+        while (page_state == PAGE_STATE_LOADING &&
+               (int32_t)(timer_ticks() - deadline) < 0) {
+            search_net_drain();
         }
     }
 
@@ -906,6 +1098,14 @@ static void search_poll_net(void)
         search_net_state = SEARCH_NET_ERROR;
         search_net_resp_id = -1;
         search_merge_results();
+        ui_dirty = 1;
+    }
+
+    if (page_state == PAGE_STATE_LOADING &&
+        (uint32_t)(now - page_wait_start) > PAGE_TIMEOUT) {
+        page_state = PAGE_STATE_ERROR;
+        page_req_id = -1;
+        search_copy(page_message, "Sayfa zaman asimina ugradi", sizeof(page_message));
         ui_dirty = 1;
     }
 }
@@ -1111,10 +1311,45 @@ int ui_handle_key(int key)
         return 1;
     }
 
+    /* 0. Web okuyucu aktifse kaydirma ve gezinme tuslari. */
+    if (windows[UI_WIN_BROWSER].is_visible &&
+        !windows[UI_WIN_BROWSER].is_minimized &&
+        windows[UI_WIN_BROWSER].is_active) {
+        int visible = page_visible_lines();
+        if (key == KEY_UP) {
+            page_scroll_by(-1);
+        } else if (key == KEY_DOWN) {
+            page_scroll_by(1);
+        } else if (key == KEY_PGUP) {
+            page_scroll_by(-visible);
+        } else if (key == KEY_PGDN) {
+            page_scroll_by(visible);
+        } else if (key == KEY_HOME) {
+            page_scroll_to(0);
+        } else if (key == KEY_END) {
+            page_scroll_to(page_line_count - visible);
+        } else if (key == 'r' || key == 'R') {
+            page_reload();
+        } else if (key == '\b' || key == '\n') {
+            if (windows[UI_WIN_SEARCH].is_visible) {
+                set_active_window(UI_WIN_SEARCH);
+            } else {
+                ui_search_open(search_query);
+            }
+            ui_dirty = 1;
+        }
+        return 1;
+    }
+
     /* 1. Arama Penceresi Aktifse Sorgu Girisi */
     if (windows[UI_WIN_SEARCH].is_visible &&
         !windows[UI_WIN_SEARCH].is_minimized &&
         windows[UI_WIN_SEARCH].is_active) {
+        if (key == '\b' && search_detail >= 0) {
+            search_detail = -1;
+            ui_dirty = 1;
+            return 1;
+        }
         if ((key >= 32 && key <= 126) || is_turkish_char(key)) {
             if (search_query_len < SEARCH_QUERY_MAX) {
                 search_query[search_query_len++] = (char)key;
@@ -1132,8 +1367,7 @@ int ui_handle_key(int key)
             return 1;
         } else if (key == '\n') {
             if (search_detail >= 0) {
-                search_detail = -1;
-                ui_dirty = 1;
+                page_open_result(search_detail);
                 return 1;
             }
             if (search_query[0] && search_result_count > 0) {
@@ -1283,6 +1517,7 @@ static void draw_window_header(window_t *win)
     else if (win->id == UI_WIN_MINES)    { icon = "*"; icon_col = VGA_YELLOW; }
     else if (win->id == UI_WIN_SETTINGS) { icon = "A"; icon_col = VGA_LIGHT_GREEN; }
     else if (win->id == UI_WIN_SEARCH)   { icon = "?"; icon_col = VGA_LIGHT_CYAN; }
+    else if (win->id == UI_WIN_BROWSER)  { icon = "W"; icon_col = UI_ACCENT; }
 
     gfx_fill_rounded_rect_rgb(win->x + 7, win->y + 5, 16, 15, 3,
                               gfx_rgb(14, 18, 26));
@@ -2300,8 +2535,18 @@ static void draw_search_content(window_t *win)
         gfx_hline_rgb(dx + 16, dy + 172, dw - 32, gfx_rgb(45, 55, 74));
         gfx_text(dx + 16, dy + 184, "DuckDuckGo uzerinden anonim arama",
                  VGA_DARK_GREY, 0xFF);
-        gfx_text(dx + 16, dy + 200, "Sayfa icerigi bu surumde goruntulenmiyor.",
-                 VGA_DARK_GREY, 0xFF);
+
+        int open_x = back_x - 124;
+        int open_y = dy + 176;
+        int open_hover = (mx >= open_x && mx <= open_x + 112 &&
+                          my >= open_y && my <= open_y + 24);
+        gfx_fill_rounded_rect_rgb(open_x, open_y, 112, 24, 4,
+                                  open_hover ? gfx_rgb(40, 160, 235)
+                                             : gfx_rgb(28, 120, 190));
+        gfx_rect_rounded_rgb(open_x, open_y, 112, 24, 4,
+                             open_hover ? gfx_rgb(130, 220, 255)
+                                        : gfx_rgb(55, 130, 190));
+        gfx_text(open_x + 20, open_y + 8, "Sayfayi Ac", VGA_WHITE, 0xFF);
     } else if (search_result_count == 0) {
         const char *none = "Sonuc bulunamadi";
         const char *tip = "Dosya adi, icerik, uygulama veya komut deneyin.";
@@ -2411,6 +2656,211 @@ static void draw_search_content(window_t *win)
     int net_x = x + win->w - SEARCH_PAD - (int)strlen(net_text) * 8;
     gfx_text(net_x, y + win->h - 20, net_text,
              search_net_status_color(), 0xFF);
+}
+
+static uint8_t page_line_color(int kind)
+{
+    switch (kind) {
+    case 1: return VGA_WHITE;
+    case 3: return VGA_LIGHT_CYAN;
+    case 4: return VGA_DARK_GREY;
+    case 5: return VGA_DARK_GREY;
+    default: return VGA_LIGHT_GREY;
+    }
+}
+
+static void draw_browser_content(window_t *win)
+{
+    int mx, my, buttons;
+    mouse_get_state(&mx, &my, &buttons);
+
+    int x = win->x;
+    int y = win->y;
+    int w = win->w;
+    int h = win->h;
+    int px = x + 10;
+    int py = y + 96;
+    int pw = w - 20;
+    int ph = h - 122;
+    int text_x = px + 14;
+    int text_chars = (pw - 40) / 8;
+    int line_h = 12;
+
+    page_clamp_scroll();
+
+    /* Baslik ve adres */
+    const char *title = page_title[0] ? page_title : "Web Okuyucu";
+    search_draw_clipped(x + 12, y + 30, title, VGA_WHITE, (w - 24) / 8);
+
+    const char *site = page_site[0] ? page_site : "Internet";
+    gfx_text(x + 12, y + 47, site, UI_ACCENT, 0xFF);
+    int site_w = (int)strlen(site) * 8 + 10;
+    int url_chars = (w - 24 - site_w) / 8;
+    if (url_chars > 0) {
+        search_draw_clipped(x + 12 + site_w, y + 47, page_url,
+                            VGA_DARK_GREY, url_chars);
+    }
+
+    /* Arac cubugu */
+    int back_x = x + 12;
+    int back_y = y + 64;
+    int back_hover = (mx >= back_x && mx <= back_x + 64 &&
+                      my >= back_y && my <= back_y + 22);
+    gfx_fill_rounded_rect_rgb(back_x, back_y, 64, 22, 4,
+                              back_hover ? gfx_rgb(45, 58, 82)
+                                         : gfx_rgb(28, 35, 50));
+    gfx_rect_rounded_rgb(back_x, back_y, 64, 22, 4,
+                         back_hover ? gfx_rgb(95, 205, 255)
+                                    : gfx_rgb(55, 70, 95));
+    gfx_text(back_x + 10, back_y + 7, "Arama", VGA_WHITE, 0xFF);
+
+    int reload_x = x + 82;
+    int reload_hover = (mx >= reload_x && mx <= reload_x + 64 &&
+                        my >= back_y && my <= back_y + 22);
+    gfx_fill_rounded_rect_rgb(reload_x, back_y, 64, 22, 4,
+                              reload_hover ? gfx_rgb(45, 58, 82)
+                                           : gfx_rgb(28, 35, 50));
+    gfx_rect_rounded_rgb(reload_x, back_y, 64, 22, 4,
+                         reload_hover ? gfx_rgb(95, 205, 255)
+                                      : gfx_rgb(55, 70, 95));
+    gfx_text(reload_x + 9, back_y + 7, "Yenile", VGA_WHITE, 0xFF);
+
+    char status[80];
+    uint8_t status_color = VGA_DARK_GREY;
+    if (page_state == PAGE_STATE_LOADING) {
+        if (page_expected_lines > 0) {
+            string_format(status, sizeof(status), "Sayfa aliniyor %d/%d",
+                          page_line_count, page_expected_lines);
+        } else {
+            string_format(status, sizeof(status), "Sayfa yukleniyor%s",
+                          ((timer_ticks() / 40) & 1) ? "..." : "");
+        }
+        status_color = VGA_YELLOW;
+    } else if (page_state == PAGE_STATE_READY) {
+        string_format(status, sizeof(status), "Internet: hazir | %d satir",
+                      page_line_count);
+        status_color = VGA_LIGHT_GREEN;
+    } else if (page_state == PAGE_STATE_ERROR) {
+        string_format(status, sizeof(status), "Internet: hata");
+        status_color = VGA_LIGHT_RED;
+    } else {
+        string_format(status, sizeof(status), "Internet: yok");
+    }
+    search_draw_clipped(x + w - 12 - (int)strlen(status) * 8,
+                        back_y + 7, status, status_color, 52);
+
+    gfx_hline_rgb(x + 12, y + 91, w - 24, gfx_rgb(45, 55, 74));
+
+    /* Icerik paneli */
+    gfx_fill_rounded_rect_rgb(px, py, pw, ph, 5, gfx_rgb(23, 28, 39));
+    gfx_rect_rounded_rgb(px, py, pw, ph, 5, gfx_rgb(43, 53, 72));
+
+    if (page_line_count == 0) {
+        const char *message = "Sayfa metni bekleniyor...";
+        uint8_t color = VGA_DARK_GREY;
+        if (page_state == PAGE_STATE_ERROR) {
+            message = page_message[0] ? page_message : "Sayfa acilamadi";
+            color = VGA_LIGHT_RED;
+        } else if (page_state == PAGE_STATE_READY) {
+            message = "Sayfa metni bulunamadi";
+            color = VGA_DARK_GREY;
+        } else if (page_state == PAGE_STATE_LOADING) {
+            message = "Sayfa yukleniyor...";
+            color = UI_ACCENT;
+        }
+        int message_x = px + (pw - (int)strlen(message) * 8) / 2;
+        if (message_x < px + 12) message_x = px + 12;
+        gfx_text(message_x, py + 64, message, color, 0xFF);
+        if (page_url[0]) {
+            int url_x = px + (pw - (int)strlen(page_url) * 8) / 2;
+            if (url_x < px + 12) url_x = px + 12;
+            search_draw_clipped(url_x, py + 84, page_url, VGA_DARK_GREY,
+                                (pw - 24) / 8);
+        }
+        if (page_state == PAGE_STATE_ERROR) {
+            const char *hint = "Yenile dugmesiyle tekrar deneyin.";
+            int hint_x = px + (pw - (int)strlen(hint) * 8) / 2;
+            if (hint_x < px + 12) hint_x = px + 12;
+            gfx_text(hint_x, py + 108, hint, VGA_DARK_GREY, 0xFF);
+        }
+    } else {
+        int visible = page_visible_lines();
+        int line_y = py + 10;
+        for (int i = 0; i < visible; i++) {
+            int index = page_scroll + i;
+            if (index >= page_line_count) break;
+            int kind = page_line_kinds[index];
+            const char *line = page_lines[index];
+            if (!line[0]) {
+                line_y += line_h;
+                continue;
+            }
+            if (kind == 1) {
+                gfx_fill_rect_rgb(text_x - 8, line_y + 1, 3, 8, UI_ACCENT);
+            }
+            search_draw_clipped(text_x, line_y, line,
+                                page_line_color(kind), text_chars);
+            line_y += line_h;
+        }
+    }
+
+    /* Kaydirma cubugu ve oklari */
+    int arrow_x = px + pw - 20;
+    int up_y = py + 4;
+    int down_y = py + ph - 18;
+    int up_hover = (mx >= arrow_x && mx <= arrow_x + 14 &&
+                    my >= up_y && my <= up_y + 14);
+    int down_hover = (mx >= arrow_x && mx <= arrow_x + 14 &&
+                      my >= down_y && my <= down_y + 14);
+    gfx_fill_rounded_rect_rgb(arrow_x, up_y, 14, 14, 3,
+                              up_hover ? gfx_rgb(45, 58, 82)
+                                       : gfx_rgb(28, 35, 50));
+    gfx_fill_rounded_rect_rgb(arrow_x, down_y, 14, 14, 3,
+                              down_hover ? gfx_rgb(45, 58, 82)
+                                         : gfx_rgb(28, 35, 50));
+    gfx_text(arrow_x + 4, up_y + 3, "^", VGA_LIGHT_GREY, 0xFF);
+    gfx_text(arrow_x + 4, down_y + 3, "v", VGA_LIGHT_GREY, 0xFF);
+
+    int track_x = px + pw - 15;
+    int track_y = py + 22;
+    int track_h = ph - 48;
+    gfx_fill_rect_rgb(track_x, track_y, 6, track_h, gfx_rgb(15, 19, 28));
+
+    if (page_line_count > page_visible_lines()) {
+        int thumb_h = track_h * page_visible_lines() / page_line_count;
+        if (thumb_h < 16) thumb_h = 16;
+        int max_scroll = page_line_count - page_visible_lines();
+        int thumb_y = track_y + (track_h - thumb_h) * page_scroll / max_scroll;
+        gfx_fill_rounded_rect_rgb(track_x, thumb_y, 6, thumb_h, 3,
+                                  gfx_rgb(75, 155, 220));
+    }
+
+    /* Alt bilgi */
+    char footer[80];
+    if (page_state == PAGE_STATE_LOADING) {
+        string_format(footer, sizeof(footer), "%d/%d satir alindi",
+                      page_line_count, page_expected_lines);
+    } else if (page_state == PAGE_STATE_READY) {
+        string_format(footer, sizeof(footer), "%d satir | PgUp/PgDn ile kaydir",
+                      page_line_count);
+    } else if (page_state == PAGE_STATE_ERROR) {
+        string_format(footer, sizeof(footer), "Sayfa acilamadi");
+    } else {
+        string_format(footer, sizeof(footer), "Hazir");
+    }
+    search_draw_clipped(x + 12, y + h - 20, footer, VGA_DARK_GREY, 54);
+
+    if (page_line_count > 0) {
+        int visible = page_visible_lines();
+        int first = page_scroll + 1;
+        int last = page_scroll + visible;
+        if (last > page_line_count) last = page_line_count;
+        char range[40];
+        string_format(range, sizeof(range), "Satir %d-%d / %d",
+                      first, last, page_line_count);
+        int range_x = x + w - 12 - (int)strlen(range) * 8;
+        gfx_text(range_x, y + h - 20, range, VGA_DARK_GREY, 0xFF);
+    }
 }
 
 static void draw_desktop_icons(void)
@@ -2533,7 +2983,7 @@ static void draw_taskbar(void)
     /* Pencere Sekmeleri */
     static const char *tab_titles[UI_WIN_COUNT] = {
         "Term", "Bilgi", "Hesap", "Dosya",
-        "Not", "Paint", "Mayin", "Ayar", "Arama"
+        "Not", "Paint", "Mayin", "Ayar", "Arama", "Web"
     };
 
     int tab_x = 100;
@@ -2704,6 +3154,7 @@ void ui_render(void)
         else if (windows[i].id == UI_WIN_MINES) draw_mines_content(&windows[i]);
         else if (windows[i].id == UI_WIN_SETTINGS) draw_settings_content(&windows[i]);
         else if (windows[i].id == UI_WIN_SEARCH) draw_search_content(&windows[i]);
+        else if (windows[i].id == UI_WIN_BROWSER) draw_browser_content(&windows[i]);
     }
 
     if (active_idx >= 0) {
@@ -2717,6 +3168,7 @@ void ui_render(void)
         else if (windows[active_idx].id == UI_WIN_MINES) draw_mines_content(&windows[active_idx]);
         else if (windows[active_idx].id == UI_WIN_SETTINGS) draw_settings_content(&windows[active_idx]);
         else if (windows[active_idx].id == UI_WIN_SEARCH) draw_search_content(&windows[active_idx]);
+        else if (windows[active_idx].id == UI_WIN_BROWSER) draw_browser_content(&windows[active_idx]);
     }
 
     /* 4. Alt Gorev Cubugu */
@@ -3060,6 +3512,51 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                         return;
                     }
                 }
+            } else if (w->id == UI_WIN_BROWSER) {
+                int back_x = w->x + 12;
+                int back_y = w->y + 64;
+                int px = w->x + 10;
+                int py = w->y + 96;
+                int pw = w->w - 20;
+                int ph = w->h - 122;
+
+                if (mx >= back_x && mx <= back_x + 64 &&
+                    my >= back_y && my <= back_y + 22) {
+                    if (windows[UI_WIN_SEARCH].is_visible) {
+                        set_active_window(UI_WIN_SEARCH);
+                    } else {
+                        ui_search_open(search_query);
+                    }
+                    ui_dirty = 1;
+                    return;
+                }
+                if (mx >= back_x + 70 && mx <= back_x + 134 &&
+                    my >= back_y && my <= back_y + 22) {
+                    page_reload();
+                    return;
+                }
+
+                int arrow_x = px + pw - 20;
+                if (mx >= arrow_x && mx <= arrow_x + 14 &&
+                    my >= py + 4 && my <= py + 18) {
+                    page_scroll_by(-3);
+                    return;
+                }
+                if (mx >= arrow_x && mx <= arrow_x + 14 &&
+                    my >= py + ph - 18 && my <= py + ph - 4) {
+                    page_scroll_by(3);
+                    return;
+                }
+
+                int track_y = py + 22;
+                int track_h = ph - 48;
+                if (mx >= px + pw - 24 && mx <= px + pw - 8 &&
+                    my >= track_y && my <= track_y + track_h) {
+                    int visible = page_visible_lines();
+                    int target = (my - track_y) * page_line_count / track_h;
+                    page_scroll_to(target - visible / 2);
+                    return;
+                }
             } else if (w->id == UI_WIN_SEARCH) {
                 int field_x = w->x + SEARCH_PAD;
                 int field_w = w->w - 2 * SEARCH_PAD - SEARCH_BTN_W - 8;
@@ -3090,6 +3587,14 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                     int dy = w->y + SEARCH_RESULTS_TOP;
                     int back_x = row_x + row_w - 68;
                     int back_y = dy + 8;
+                    int open_x = back_x - 124;
+                    int open_y = dy + 176;
+
+                    if (mx >= open_x && mx <= open_x + 112 &&
+                        my >= open_y && my <= open_y + 24) {
+                        page_open_result(search_detail);
+                        return;
+                    }
                     if (mx >= back_x && mx <= back_x + 52 &&
                         my >= back_y && my <= back_y + 22) {
                         search_detail = -1;
