@@ -479,11 +479,19 @@ void ui_term_putc(char c)
 #define PAGE_LINE_MAX      96
 #define PAGE_MAX_LINES     420
 #define PAGE_TIMEOUT       2000  /* 20 saniye (100 Hz) */
+#define PAGE_IMAGE_TIMEOUT 3000  /* 30 saniye: tarayici + gorsel aktarimi */
+#define PAGE_IMAGE_W       676
+#define PAGE_IMAGE_H       394
+#define PAGE_QOI_MAX       (220 * 1024)
 
 #define PAGE_STATE_OFF     0
 #define PAGE_STATE_LOADING 1
 #define PAGE_STATE_READY   2
 #define PAGE_STATE_ERROR   3
+
+#define PAGE_MODE_NONE     0
+#define PAGE_MODE_TEXT     1
+#define PAGE_MODE_IMAGE    2
 
 typedef struct {
     int type;
@@ -584,10 +592,27 @@ static uint8_t  page_line_kinds[PAGE_MAX_LINES];
 static int      page_line_count;
 static int      page_expected_lines;
 static int      page_state = PAGE_STATE_OFF;
+static int      page_mode = PAGE_MODE_NONE;
 static int      page_seq;
 static int      page_req_id = -1;
 static uint32_t page_wait_start;
 static int      page_scroll;
+
+/* Gercek tarayici goruntusu: QOI akisi + cozulmus RGB565 kare. */
+static uint8_t  page_qoi[PAGE_QOI_MAX];
+static uint16_t page_pixels[PAGE_IMAGE_W * PAGE_IMAGE_H];
+static int      page_qoi_len;
+static int      page_qoi_total;
+static int      page_bin_remaining;
+static int      page_bin_discard;
+static int      page_image_w;
+static int      page_image_h;
+static int      page_image_ready;
+static int      page_doc_scroll;
+static int      page_doc_height;
+static int      page_view_height;
+static int      page_can_back;
+static int      page_can_forward;
 
 static void search_copy(char *dst, const char *src, int max)
 {
@@ -824,6 +849,206 @@ static int search_net_split(char *line, char **fields, int max)
 
 static void page_handle_line(char **fields, int count);
 
+static uint32_t page_be32(const uint8_t *data)
+{
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) | (uint32_t)data[3];
+}
+
+static void page_run_pixels(int *px, int *py, int width, int height,
+                            uint16_t color, int count)
+{
+    while (count > 0 && *py < height) {
+        int available = width - *px;
+        if (available > count) available = count;
+        uint16_t *row = &page_pixels[(uint32_t)(*py) * PAGE_IMAGE_W + *px];
+        for (int i = 0; i < available; i++) {
+            row[i] = color;
+        }
+        *px += available;
+        count -= available;
+        if (*px >= width) {
+            *px = 0;
+            (*py)++;
+        }
+    }
+}
+
+static uint16_t page_rgb565(int r, int g, int b)
+{
+    return (uint16_t)((((uint16_t)r & 0xF8u) << 8) |
+                      (((uint16_t)g & 0xFCu) << 3) |
+                      (((uint16_t)b & 0xF8u) >> 3));
+}
+
+/* QOI (Quite OK Image) akisini RGB565 tampona cozer. */
+static int page_qoi_decode(const uint8_t *data, int length,
+                           int width, int height)
+{
+    if (!data || length < 14 || width <= 0 || height <= 0 ||
+        width > PAGE_IMAGE_W || height > PAGE_IMAGE_H) {
+        return 0;
+    }
+    if (data[0] != 'q' || data[1] != 'o' || data[2] != 'i' ||
+        data[3] != 'f') {
+        return 0;
+    }
+    if ((int)page_be32(data + 4) != width ||
+        (int)page_be32(data + 8) != height) {
+        return 0;
+    }
+    if (data[12] < 3 || data[13] > 1) {
+        return 0;
+    }
+
+    uint32_t index[64];
+    memset(index, 0, sizeof(index));
+
+    int r = 0, g = 0, b = 0;
+    int px = 0, py = 0;
+    int pos = 14;
+
+    while (pos < length && py < height) {
+        uint8_t op = data[pos++];
+        int run = 1;
+        int update_index = 1;
+
+        if (op == 0xFE) {
+            if (pos + 2 >= length) return 0;
+            r = data[pos++];
+            g = data[pos++];
+            b = data[pos++];
+        } else if (op == 0xFF) {
+            if (pos + 3 >= length) return 0;
+            r = data[pos++];
+            g = data[pos++];
+            b = data[pos++];
+            pos++;                   /* alfa yok sayilir */
+        } else if (op < 0x40) {
+            uint32_t value = index[op];
+            r = (int)((value >> 24) & 0xFF);
+            g = (int)((value >> 16) & 0xFF);
+            b = (int)((value >> 8) & 0xFF);
+            update_index = 0;
+        } else if (op < 0x80) {
+            r += (int)((op >> 4) & 0x03) - 2;
+            g += (int)((op >> 2) & 0x03) - 2;
+            b += (int)(op & 0x03) - 2;
+            if (r < 0) r = 0;
+            if (r > 255) r = 255;
+            if (g < 0) g = 0;
+            if (g > 255) g = 255;
+            if (b < 0) b = 0;
+            if (b > 255) b = 255;
+        } else if (op < 0xC0) {
+            if (pos >= length) return 0;
+            uint8_t second = data[pos++];
+            int dg = (int)(op & 0x3F) - 32;
+            r += dg + (int)((second >> 4) & 0x0F) - 8;
+            g += dg;
+            b += dg + (int)(second & 0x0F) - 8;
+            if (r < 0) r = 0;
+            if (r > 255) r = 255;
+            if (g < 0) g = 0;
+            if (g > 255) g = 255;
+            if (b < 0) b = 0;
+            if (b > 255) b = 255;
+        } else {
+            run = (int)(op & 0x3F) + 1;
+            update_index = 0;
+        }
+
+        if (update_index) {
+            uint32_t packed = ((uint32_t)r << 24) | ((uint32_t)g << 16) |
+                              ((uint32_t)b << 8) | 255u;
+            index[(r * 3 + g * 5 + b * 7 + 255 * 11) & 63] = packed;
+        }
+
+        page_run_pixels(&px, &py, width, height,
+                        page_rgb565(r, g, b), run);
+    }
+
+    return py >= height;
+}
+
+static void page_image_failed(const char *message)
+{
+    page_state = PAGE_STATE_ERROR;
+    page_req_id = -1;
+    page_bin_remaining = 0;
+    page_bin_discard = 0;
+    page_qoi_len = 0;
+    page_qoi_total = 0;
+    search_copy(page_message, message, sizeof(page_message));
+    ui_dirty = 1;
+}
+
+static void page_finish_image(void)
+{
+    if (page_bin_discard == 2) {
+        page_bin_remaining = 0;
+        page_qoi_len = 0;
+        page_qoi_total = 0;
+        page_bin_discard = 0;
+        return;
+    }
+    if (page_bin_discard) {
+        page_image_failed("Sayfa gorseli aktarilamadi");
+        return;
+    }
+    if (page_qoi_total <= 0 || page_qoi_len != page_qoi_total ||
+        !page_qoi_decode(page_qoi, page_qoi_len,
+                         page_image_w, page_image_h)) {
+        page_image_failed("Sayfa gorseli cozulemedi");
+        return;
+    }
+
+    page_image_ready = 1;
+    page_state = PAGE_STATE_READY;
+    page_req_id = -1;
+    page_bin_remaining = 0;
+    page_qoi_len = 0;
+    page_qoi_total = 0;
+    page_bin_discard = 0;
+    ui_dirty = 1;
+}
+
+static void page_send_action(char action, int first, int second)
+{
+    if (!serial2_present()) {
+        page_state = PAGE_STATE_ERROR;
+        search_copy(page_message, "Internet baglantisi yok", sizeof(page_message));
+        ui_dirty = 1;
+        return;
+    }
+    if (page_state == PAGE_STATE_LOADING) {
+        return;
+    }
+
+    page_seq++;
+    page_req_id = page_seq;
+    page_state = PAGE_STATE_LOADING;
+    page_wait_start = timer_ticks();
+    page_message[0] = '\0';
+    /* Onceki karenin ilerlemesi yeni eylem yuklenirken yanlislikla %100
+       gostermesin; eski kare hazir olana kadar ekranda kalir. */
+    page_qoi_len = 0;
+    page_qoi_total = 0;
+
+    char line[64];
+    if (action == 'S' || action == 'J') {
+        string_format(line, sizeof(line), "%c\t%d\t%d\n",
+                      action, page_req_id, first);
+    } else if (action == 'C') {
+        string_format(line, sizeof(line), "C\t%d\t%d\t%d\n",
+                      page_req_id, first, second);
+    } else {
+        string_format(line, sizeof(line), "%c\t%d\n", action, page_req_id);
+    }
+    serial2_write(line);
+    ui_dirty = 1;
+}
+
 static void page_send_request(const char *url)
 {
     page_seq++;
@@ -834,6 +1059,19 @@ static void page_send_request(const char *url)
     page_message[0] = '\0';
     page_state = PAGE_STATE_LOADING;
     page_wait_start = timer_ticks();
+    page_mode = PAGE_MODE_NONE;
+    page_image_ready = 0;
+    page_image_w = 0;
+    page_image_h = 0;
+    page_qoi_len = 0;
+    page_qoi_total = 0;
+    page_bin_remaining = 0;
+    page_bin_discard = 0;
+    page_doc_scroll = 0;
+    page_doc_height = 0;
+    page_view_height = PAGE_IMAGE_H;
+    page_can_back = 0;
+    page_can_forward = 0;
 
     if (!serial2_present()) {
         page_state = PAGE_STATE_ERROR;
@@ -874,7 +1112,10 @@ static void page_open_result(int index)
 
 static void page_reload(void)
 {
-    if (page_url[0]) {
+    if (!page_url[0]) return;
+    if (page_mode == PAGE_MODE_IMAGE && page_state != PAGE_STATE_LOADING) {
+        page_send_action('Y', 0, 0);
+    } else {
         page_send_request(page_url);
     }
 }
@@ -889,6 +1130,10 @@ static int page_visible_lines(void)
 
 static void page_clamp_scroll(void)
 {
+    if (page_mode == PAGE_MODE_IMAGE) {
+        page_scroll = 0;
+        return;
+    }
     int max = page_line_count - page_visible_lines();
     if (max < 0) max = 0;
     if (page_scroll > max) page_scroll = max;
@@ -897,6 +1142,12 @@ static void page_clamp_scroll(void)
 
 static void page_scroll_by(int delta)
 {
+    if (page_mode == PAGE_MODE_IMAGE) {
+        if (page_image_ready && page_state != PAGE_STATE_LOADING) {
+            page_send_action('S', delta * 12, 0);
+        }
+        return;
+    }
     page_scroll += delta;
     page_clamp_scroll();
     ui_dirty = 1;
@@ -904,6 +1155,12 @@ static void page_scroll_by(int delta)
 
 static void page_scroll_to(int line)
 {
+    if (page_mode == PAGE_MODE_IMAGE) {
+        if (page_image_ready && page_state != PAGE_STATE_LOADING) {
+            page_send_action('J', line < 0 ? 0 : line, 0);
+        }
+        return;
+    }
     page_scroll = line;
     page_clamp_scroll();
     ui_dirty = 1;
@@ -913,10 +1170,67 @@ static void page_handle_line(char **fields, int count)
 {
     if (count < 2) return;
 
+    /* Gorsel basligi kimlik eslesmese bile tuketilmeli; aksi halde QOI
+       baytlari satir sanilip protokol kayar. */
+    if (strcmp(fields[0], "V") == 0 && count >= 13) {
+        int id = search_net_parse_int(fields[1]);
+        int width = search_net_parse_int(fields[2]);
+        int height = search_net_parse_int(fields[3]);
+        int length = search_net_parse_int(fields[4]);
+        if (length < 0) length = 0;
+
+        if (id != page_req_id || page_req_id < 0) {
+            page_bin_remaining = length;
+            page_bin_discard = 2;
+            page_qoi_len = 0;
+            return;
+        }
+
+        page_bin_remaining = length;
+        page_qoi_len = 0;
+        page_qoi_total = length;
+        page_bin_discard = 0;
+        page_image_w = width;
+        page_image_h = height;
+        page_image_ready = 0;
+        page_line_count = 0;
+        page_expected_lines = 0;
+        page_scroll = 0;
+        page_mode = PAGE_MODE_IMAGE;
+        page_state = PAGE_STATE_LOADING;
+        page_wait_start = timer_ticks();  /* aktarim icin yeni sure */
+        page_doc_scroll = search_net_parse_int(fields[8]);
+        page_doc_height = search_net_parse_int(fields[9]);
+        page_view_height = search_net_parse_int(fields[10]);
+        if (page_view_height <= 0) page_view_height = PAGE_IMAGE_H;
+        page_can_back = search_net_parse_int(fields[11]);
+        page_can_forward = search_net_parse_int(fields[12]);
+
+        if (width != PAGE_IMAGE_W || height != PAGE_IMAGE_H ||
+            length < 14 || length > PAGE_QOI_MAX) {
+            page_bin_discard = 1;
+        }
+
+        search_copy(page_title, fields[5], sizeof(page_title));
+        search_copy(page_site, fields[6], sizeof(page_site));
+        search_copy(page_url, fields[7], sizeof(page_url));
+        page_message[0] = '\0';
+        if (length == 0) {
+            page_image_failed("Sayfa gorseli bos");
+            return;
+        }
+        ui_dirty = 1;
+        return;
+    }
+
     int id = search_net_parse_int(fields[1]);
     if (id != page_req_id || page_req_id < 0) return;
 
     if (strcmp(fields[0], "G") == 0 && count >= 6) {
+        page_mode = PAGE_MODE_TEXT;
+        page_image_ready = 0;
+        page_image_w = 0;
+        page_image_h = 0;
         page_expected_lines = search_net_parse_int(fields[2]);
         if (page_expected_lines < 0) page_expected_lines = 0;
         search_copy(page_title, fields[3], sizeof(page_title));
@@ -927,7 +1241,7 @@ static void page_handle_line(char **fields, int count)
         page_state = PAGE_STATE_LOADING;
         ui_dirty = 1;
     } else if (strcmp(fields[0], "B") == 0 && count >= 4) {
-        if (page_line_count < PAGE_MAX_LINES) {
+        if (page_mode == PAGE_MODE_TEXT && page_line_count < PAGE_MAX_LINES) {
             int kind = search_net_parse_int(fields[2]);
             if (kind < 0 || kind > 5) kind = 0;
             search_copy(page_lines[page_line_count], fields[3], PAGE_LINE_MAX);
@@ -953,14 +1267,15 @@ static void page_handle_line(char **fields, int count)
 
 static void search_net_handle_line(char *line)
 {
-    char *fields[6];
-    int count = search_net_split(line, fields, 6);
+    char *fields[16];
+    int count = search_net_split(line, fields, 16);
     if (count < 1) return;
 
     if (count >= 2 && (strcmp(fields[0], "G") == 0 ||
                        strcmp(fields[0], "B") == 0 ||
                        strcmp(fields[0], "Z") == 0 ||
-                       strcmp(fields[0], "X") == 0)) {
+                       strcmp(fields[0], "X") == 0 ||
+                       strcmp(fields[0], "V") == 0)) {
         page_handle_line(fields, count);
         return;
     }
@@ -1032,6 +1347,18 @@ static void search_net_send(void)
 
 static void search_net_consume(int c)
 {
+    if (page_bin_remaining > 0) {
+        if (page_bin_discard == 0 && page_qoi_len < PAGE_QOI_MAX) {
+            page_qoi[page_qoi_len++] = (uint8_t)c;
+        }
+        page_bin_remaining--;
+        if ((page_qoi_len & 2047) == 0) ui_dirty = 1;
+        if (page_bin_remaining == 0) {
+            page_finish_image();
+        }
+        return;
+    }
+
     if (c == '\n') {
         search_net_line[search_net_line_len] = '\0';
         if (search_net_line_len > 0) {
@@ -1076,13 +1403,14 @@ static void search_poll_net(void)
     search_net_drain();
 
     /*
-     * Sayfa satirlari akarken UART FIFO'sunu kisa bir sure bosaltmadan
-     * beklersek aktarim 100 Hz'lik zamanlayiciya takilir. Sayfa gelirken
-     * en fazla iki tick boyunca kesintisiz oku; boylece 420 satir saniyeler
-     * yerine ~2 saniyede tamamlanir.
+     * Sayfa satirlari veya QOI baytlari akarken UART FIFO'sunu kisa bir
+     * sure bosaltmadan beklersek aktarim 100 Hz'lik zamanlayiciya takilir.
+     * Gorsel aktariminda daha uzun bir pencere kullanilir.
      */
-    if (page_state == PAGE_STATE_LOADING && page_expected_lines > 0) {
-        uint32_t deadline = timer_ticks() + 2;
+    if (page_state == PAGE_STATE_LOADING &&
+        (page_expected_lines > 0 || page_bin_remaining > 0)) {
+        uint32_t window = (page_bin_remaining > 0) ? 4 : 2;
+        uint32_t deadline = timer_ticks() + window;
         while (page_state == PAGE_STATE_LOADING &&
                (int32_t)(timer_ticks() - deadline) < 0) {
             search_net_drain();
@@ -1101,10 +1429,14 @@ static void search_poll_net(void)
         ui_dirty = 1;
     }
 
+    uint32_t page_limit = (page_mode == PAGE_MODE_IMAGE)
+                              ? PAGE_IMAGE_TIMEOUT : PAGE_TIMEOUT;
     if (page_state == PAGE_STATE_LOADING &&
-        (uint32_t)(now - page_wait_start) > PAGE_TIMEOUT) {
+        (uint32_t)(now - page_wait_start) > page_limit) {
         page_state = PAGE_STATE_ERROR;
         page_req_id = -1;
+        page_bin_remaining = 0;
+        page_bin_discard = 0;
         search_copy(page_message, "Sayfa zaman asimina ugradi", sizeof(page_message));
         ui_dirty = 1;
     }
@@ -1325,9 +1657,17 @@ int ui_handle_key(int key)
         } else if (key == KEY_PGDN) {
             page_scroll_by(visible);
         } else if (key == KEY_HOME) {
-            page_scroll_to(0);
+            if (page_mode == PAGE_MODE_IMAGE && page_image_ready) {
+                page_send_action('J', 0, 0);
+            } else {
+                page_scroll_to(0);
+            }
         } else if (key == KEY_END) {
-            page_scroll_to(page_line_count - visible);
+            if (page_mode == PAGE_MODE_IMAGE && page_image_ready) {
+                page_send_action('J', page_doc_height, 0);
+            } else {
+                page_scroll_to(page_line_count - visible);
+            }
         } else if (key == 'r' || key == 'R') {
             page_reload();
         } else if (key == '\b' || key == '\n') {
@@ -2669,6 +3009,16 @@ static uint8_t page_line_color(int kind)
     }
 }
 
+static void page_image_origin(window_t *win, int *ox, int *oy)
+{
+    int px = win->x + 10;
+    int py = win->y + 96;
+    int pw = win->w - 20;
+    int ph = win->h - 122;
+    *ox = px + (pw - PAGE_IMAGE_W) / 2;
+    *oy = py + (ph - PAGE_IMAGE_H) / 2;
+}
+
 static void draw_browser_content(window_t *win)
 {
     int mx, my, buttons;
@@ -2701,26 +3051,52 @@ static void draw_browser_content(window_t *win)
                             VGA_DARK_GREY, url_chars);
     }
 
-    /* Arac cubugu */
-    int back_x = x + 12;
+    /* Arac cubugu: arama, geri, ileri, yenile */
     int back_y = y + 64;
-    int back_hover = (mx >= back_x && mx <= back_x + 64 &&
-                      my >= back_y && my <= back_y + 22);
-    gfx_fill_rounded_rect_rgb(back_x, back_y, 64, 22, 4,
-                              back_hover ? gfx_rgb(45, 58, 82)
-                                         : gfx_rgb(28, 35, 50));
-    gfx_rect_rounded_rgb(back_x, back_y, 64, 22, 4,
-                         back_hover ? gfx_rgb(95, 205, 255)
-                                    : gfx_rgb(55, 70, 95));
-    gfx_text(back_x + 10, back_y + 7, "Arama", VGA_WHITE, 0xFF);
+    int btn_x = x + 12;
+    int hover_y = (my >= back_y && my <= back_y + 22);
 
-    int reload_x = x + 82;
-    int reload_hover = (mx >= reload_x && mx <= reload_x + 64 &&
-                        my >= back_y && my <= back_y + 22);
-    gfx_fill_rounded_rect_rgb(reload_x, back_y, 64, 22, 4,
+    int search_hover = hover_y && mx >= btn_x && mx <= btn_x + 58;
+    gfx_fill_rounded_rect_rgb(btn_x, back_y, 58, 22, 4,
+                              search_hover ? gfx_rgb(45, 58, 82)
+                                           : gfx_rgb(28, 35, 50));
+    gfx_rect_rounded_rgb(btn_x, back_y, 58, 22, 4,
+                         search_hover ? gfx_rgb(95, 205, 255)
+                                      : gfx_rgb(55, 70, 95));
+    gfx_text(btn_x + 10, back_y + 7, "Arama", VGA_WHITE, 0xFF);
+
+    int web_back_x = btn_x + 64;
+    int back_enabled = page_mode == PAGE_MODE_IMAGE && page_can_back;
+    int web_back_hover = hover_y && back_enabled &&
+                         mx >= web_back_x && mx <= web_back_x + 26;
+    gfx_fill_rounded_rect_rgb(web_back_x, back_y, 26, 22, 4,
+                              web_back_hover ? gfx_rgb(45, 58, 82)
+                                             : gfx_rgb(28, 35, 50));
+    gfx_rect_rounded_rgb(web_back_x, back_y, 26, 22, 4,
+                         web_back_hover ? gfx_rgb(95, 205, 255)
+                                        : gfx_rgb(55, 70, 95));
+    gfx_text(web_back_x + 9, back_y + 7, "<",
+             back_enabled ? VGA_WHITE : VGA_DARK_GREY, 0xFF);
+
+    int web_fwd_x = web_back_x + 32;
+    int fwd_enabled = page_mode == PAGE_MODE_IMAGE && page_can_forward;
+    int web_fwd_hover = hover_y && fwd_enabled &&
+                        mx >= web_fwd_x && mx <= web_fwd_x + 26;
+    gfx_fill_rounded_rect_rgb(web_fwd_x, back_y, 26, 22, 4,
+                              web_fwd_hover ? gfx_rgb(45, 58, 82)
+                                            : gfx_rgb(28, 35, 50));
+    gfx_rect_rounded_rgb(web_fwd_x, back_y, 26, 22, 4,
+                         web_fwd_hover ? gfx_rgb(95, 205, 255)
+                                       : gfx_rgb(55, 70, 95));
+    gfx_text(web_fwd_x + 9, back_y + 7, ">",
+             fwd_enabled ? VGA_WHITE : VGA_DARK_GREY, 0xFF);
+
+    int reload_x = web_fwd_x + 32;
+    int reload_hover = hover_y && mx >= reload_x && mx <= reload_x + 58;
+    gfx_fill_rounded_rect_rgb(reload_x, back_y, 58, 22, 4,
                               reload_hover ? gfx_rgb(45, 58, 82)
                                            : gfx_rgb(28, 35, 50));
-    gfx_rect_rounded_rgb(reload_x, back_y, 64, 22, 4,
+    gfx_rect_rounded_rgb(reload_x, back_y, 58, 22, 4,
                          reload_hover ? gfx_rgb(95, 205, 255)
                                       : gfx_rgb(55, 70, 95));
     gfx_text(reload_x + 9, back_y + 7, "Yenile", VGA_WHITE, 0xFF);
@@ -2728,7 +3104,15 @@ static void draw_browser_content(window_t *win)
     char status[80];
     uint8_t status_color = VGA_DARK_GREY;
     if (page_state == PAGE_STATE_LOADING) {
-        if (page_expected_lines > 0) {
+        if (page_mode == PAGE_MODE_IMAGE) {
+            if (page_qoi_total > 0) {
+                int pct = page_qoi_len * 100 / page_qoi_total;
+                string_format(status, sizeof(status), "Gorsel aliniyor %d%%", pct);
+            } else {
+                string_format(status, sizeof(status), "Gorsel yukleniyor%s",
+                              ((timer_ticks() / 40) & 1) ? "..." : "");
+            }
+        } else if (page_expected_lines > 0) {
             string_format(status, sizeof(status), "Sayfa aliniyor %d/%d",
                           page_line_count, page_expected_lines);
         } else {
@@ -2737,8 +3121,12 @@ static void draw_browser_content(window_t *win)
         }
         status_color = VGA_YELLOW;
     } else if (page_state == PAGE_STATE_READY) {
-        string_format(status, sizeof(status), "Internet: hazir | %d satir",
-                      page_line_count);
+        if (page_image_ready) {
+            string_format(status, sizeof(status), "Internet: hazir | gercek sayfa");
+        } else {
+            string_format(status, sizeof(status), "Internet: hazir | %d satir",
+                          page_line_count);
+        }
         status_color = VGA_LIGHT_GREEN;
     } else if (page_state == PAGE_STATE_ERROR) {
         string_format(status, sizeof(status), "Internet: hata");
@@ -2755,7 +3143,14 @@ static void draw_browser_content(window_t *win)
     gfx_fill_rounded_rect_rgb(px, py, pw, ph, 5, gfx_rgb(23, 28, 39));
     gfx_rect_rounded_rgb(px, py, pw, ph, 5, gfx_rgb(43, 53, 72));
 
-    if (page_line_count == 0) {
+    int image_x, image_y;
+    page_image_origin(win, &image_x, &image_y);
+
+    if (page_image_ready) {
+        gfx_blit_rgb565(image_x, image_y, page_image_w, page_image_h,
+                        page_pixels, PAGE_IMAGE_W);
+        gfx_rect_rounded_rgb(px, py, pw, ph, 5, gfx_rgb(43, 53, 72));
+    } else if (page_line_count == 0) {
         const char *message = "Sayfa metni bekleniyor...";
         uint8_t color = VGA_DARK_GREY;
         if (page_state == PAGE_STATE_ERROR) {
@@ -2765,7 +3160,9 @@ static void draw_browser_content(window_t *win)
             message = "Sayfa metni bulunamadi";
             color = VGA_DARK_GREY;
         } else if (page_state == PAGE_STATE_LOADING) {
-            message = "Sayfa yukleniyor...";
+            message = (page_mode == PAGE_MODE_IMAGE)
+                          ? "Gorsel sayfa yukleniyor..."
+                          : "Sayfa yukleniyor...";
             color = UI_ACCENT;
         }
         int message_x = px + (pw - (int)strlen(message) * 8) / 2;
@@ -2826,11 +3223,23 @@ static void draw_browser_content(window_t *win)
     int track_h = ph - 48;
     gfx_fill_rect_rgb(track_x, track_y, 6, track_h, gfx_rgb(15, 19, 28));
 
-    if (page_line_count > page_visible_lines()) {
-        int thumb_h = track_h * page_visible_lines() / page_line_count;
+    int content_h = page_line_count;
+    int visible_h = page_visible_lines();
+    int scroll_pos = page_scroll;
+    if (page_mode == PAGE_MODE_IMAGE && page_image_ready) {
+        content_h = page_doc_height;
+        visible_h = page_view_height;
+        scroll_pos = page_doc_scroll;
+    }
+
+    if (content_h > visible_h && visible_h > 0) {
+        int max_scroll = content_h - visible_h;
+        int thumb_h = track_h * visible_h / content_h;
         if (thumb_h < 16) thumb_h = 16;
-        int max_scroll = page_line_count - page_visible_lines();
-        int thumb_y = track_y + (track_h - thumb_h) * page_scroll / max_scroll;
+        if (thumb_h > track_h) thumb_h = track_h;
+        if (scroll_pos < 0) scroll_pos = 0;
+        if (scroll_pos > max_scroll) scroll_pos = max_scroll;
+        int thumb_y = track_y + (track_h - thumb_h) * scroll_pos / max_scroll;
         gfx_fill_rounded_rect_rgb(track_x, thumb_y, 6, thumb_h, 3,
                                   gfx_rgb(75, 155, 220));
     }
@@ -2838,11 +3247,25 @@ static void draw_browser_content(window_t *win)
     /* Alt bilgi */
     char footer[80];
     if (page_state == PAGE_STATE_LOADING) {
-        string_format(footer, sizeof(footer), "%d/%d satir alindi",
-                      page_line_count, page_expected_lines);
+        if (page_mode == PAGE_MODE_IMAGE) {
+            if (page_qoi_total > 0) {
+                int pct = page_qoi_len * 100 / page_qoi_total;
+                string_format(footer, sizeof(footer), "Gorsel aliniyor: %d%%", pct);
+            } else {
+                string_format(footer, sizeof(footer), "Gorsel yukleniyor...");
+            }
+        } else {
+            string_format(footer, sizeof(footer), "%d/%d satir alindi",
+                          page_line_count, page_expected_lines);
+        }
     } else if (page_state == PAGE_STATE_READY) {
-        string_format(footer, sizeof(footer), "%d satir | PgUp/PgDn ile kaydir",
-                      page_line_count);
+        if (page_image_ready) {
+            string_format(footer, sizeof(footer),
+                          "Gercek sayfa | tikla: gezin, PgUp/PgDn: kaydir");
+        } else {
+            string_format(footer, sizeof(footer), "%d satir | PgUp/PgDn ile kaydir",
+                          page_line_count);
+        }
     } else if (page_state == PAGE_STATE_ERROR) {
         string_format(footer, sizeof(footer), "Sayfa acilamadi");
     } else {
@@ -2850,7 +3273,17 @@ static void draw_browser_content(window_t *win)
     }
     search_draw_clipped(x + 12, y + h - 20, footer, VGA_DARK_GREY, 54);
 
-    if (page_line_count > 0) {
+    if (page_image_ready && content_h > visible_h && visible_h > 0) {
+        int max_scroll = content_h - visible_h;
+        if (max_scroll < 1) max_scroll = 1;
+        int pct = scroll_pos * 100 / max_scroll;
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        char range[40];
+        string_format(range, sizeof(range), "Kaydirma %d%%", pct);
+        int range_x = x + w - 12 - (int)strlen(range) * 8;
+        gfx_text(range_x, y + h - 20, range, VGA_DARK_GREY, 0xFF);
+    } else if (page_line_count > 0) {
         int visible = page_visible_lines();
         int first = page_scroll + 1;
         int last = page_scroll + visible;
@@ -3520,7 +3953,7 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                 int pw = w->w - 20;
                 int ph = w->h - 122;
 
-                if (mx >= back_x && mx <= back_x + 64 &&
+                if (mx >= back_x && mx <= back_x + 58 &&
                     my >= back_y && my <= back_y + 22) {
                     if (windows[UI_WIN_SEARCH].is_visible) {
                         set_active_window(UI_WIN_SEARCH);
@@ -3530,7 +3963,21 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                     ui_dirty = 1;
                     return;
                 }
-                if (mx >= back_x + 70 && mx <= back_x + 134 &&
+                if (mx >= back_x + 64 && mx <= back_x + 90 &&
+                    my >= back_y && my <= back_y + 22) {
+                    if (page_mode == PAGE_MODE_IMAGE && page_can_back) {
+                        page_send_action('B', 0, 0);
+                    }
+                    return;
+                }
+                if (mx >= back_x + 96 && mx <= back_x + 122 &&
+                    my >= back_y && my <= back_y + 22) {
+                    if (page_mode == PAGE_MODE_IMAGE && page_can_forward) {
+                        page_send_action('F', 0, 0);
+                    }
+                    return;
+                }
+                if (mx >= back_x + 128 && mx <= back_x + 186 &&
                     my >= back_y && my <= back_y + 22) {
                     page_reload();
                     return;
@@ -3552,10 +3999,29 @@ static void handle_mouse_input(int mx, int my, int just_pressed, int just_releas
                 int track_h = ph - 48;
                 if (mx >= px + pw - 24 && mx <= px + pw - 8 &&
                     my >= track_y && my <= track_y + track_h) {
-                    int visible = page_visible_lines();
-                    int target = (my - track_y) * page_line_count / track_h;
-                    page_scroll_to(target - visible / 2);
+                    if (page_mode == PAGE_MODE_IMAGE && page_image_ready) {
+                        int max_scroll = page_doc_height - page_view_height;
+                        if (max_scroll > 0) {
+                            int target = (my - track_y) * max_scroll / track_h;
+                            page_send_action('J', target, 0);
+                        }
+                    } else {
+                        int visible = page_visible_lines();
+                        int target = (my - track_y) * page_line_count / track_h;
+                        page_scroll_to(target - visible / 2);
+                    }
                     return;
+                }
+
+                if (page_mode == PAGE_MODE_IMAGE && page_image_ready &&
+                    page_state != PAGE_STATE_LOADING) {
+                    int image_x, image_y;
+                    page_image_origin(w, &image_x, &image_y);
+                    if (mx >= image_x && mx < image_x + page_image_w &&
+                        my >= image_y && my < image_y + page_image_h) {
+                        page_send_action('C', mx - image_x, my - image_y);
+                        return;
+                    }
                 }
             } else if (w->id == UI_WIN_SEARCH) {
                 int field_x = w->x + SEARCH_PAD;

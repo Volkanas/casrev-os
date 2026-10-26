@@ -84,6 +84,8 @@ void gfx_fill_rounded_rect_gradient_v(int x, int y, int w, int h, int r,
 void gfx_gradient_v(int x, int y, int w, int h, uint16_t top, uint16_t bottom);
 void gfx_blend_rect(int x, int y, int w, int h, uint16_t color, uint8_t alpha);
 void gfx_shadow_soft(int x, int y, int w, int h);
+void gfx_blit_rgb565(int x, int y, int w, int h,
+                     const uint16_t *src, int src_pitch);
 
 /* bg == 0xFF ise arka plan cizilmez (saydam metin). */
 void gfx_char(int x, int y, unsigned char c, uint8_t fg, uint8_t bg);

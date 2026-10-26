@@ -287,6 +287,38 @@ void gfx_fill_rect(int x, int y, int w, int h, uint8_t color)
     gfx_fill_rect_rgb(x, y, w, h, legacy_lut[color]);
 }
 
+void gfx_blit_rgb565(int x, int y, int w, int h,
+                     const uint16_t *src, int src_pitch)
+{
+    if (!src || w <= 0 || h <= 0 || src_pitch < w) {
+        return;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)screen_w) x1 = (int)screen_w;
+    if (y1 > (int)screen_h) y1 = (int)screen_h;
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    int skip_x = x0 - x;
+    int width = x1 - x0;
+
+    for (int yy = y0; yy < y1; yy++) {
+        const uint16_t *src_row = src +
+            (uint32_t)(yy - y) * (uint32_t)src_pitch + (uint32_t)skip_x;
+        uint16_t *dst_row = backbuffer +
+            (uint32_t)yy * GFX_MAX_W + (uint32_t)x0;
+        memcpy(dst_row, src_row, (size_t)width * sizeof(uint16_t));
+    }
+}
+
 void gfx_hline_rgb(int x, int y, int w, uint16_t color)
 {
     gfx_fill_rect_rgb(x, y, w, 1, color);

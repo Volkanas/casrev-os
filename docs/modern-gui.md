@@ -161,29 +161,63 @@ logosu, altında arama alanı ve `Ara` butonu bulunur.
 
 ## Web Okuyucu
 
-Arama sonucundaki `Sayfayı Aç` düğmesi, sayfayı host ajanına indirtir ve
-misafirde `50,24` konumunda `700×520` boyutunda `Web Okuyucu` penceresini
-açar. Pencere başlığında `W` simgesi, üst bölümde sayfa başlığı, site ve URL
-bulunur.
+Arama sonucundaki `Sayfayı Aç` düğmesi, host ajanındaki Edge/Chrome headless
+tarayıcıya CDP ile bağlanır, sayfayı `676×394` görünümde render eder ve PNG
+karesini QOI'ye çevirip COM2'den misafire gönderir. Misafir QOI'yi RGB565'e
+çözer ve pencere içerik paneline çizer. Böylece HTML/CSS düzeni, JavaScript ve
+görseller gerçek tarayıcıdaki gibi görünür.
 
-- **Araç çubuğu:** `Arama` düğmesi arama listesine döner; `Yenile` aynı URL'yi
-  yeniden ister. Sağ tarafta `Sayfa yukleniyor`, `Sayfa aliniyor N/M`,
-  `Internet: hazir | N satir` veya `Internet: hata` durumu gösterilir.
-- **Metin paneli:** Satır türleri paragraf (açık gri), başlık (beyaz, solunda
-  mavi şerit), madde (önünde `-`), alıntı (camgöbeği, önünde `|`) ve boşluk
-  olarak çizilir. Metin 8×8 fontla, satır başına en fazla 80 karakter ve
-  420 satırla sınırlıdır.
-- **Kaydırma:** Sağdaki yukarı/aşağı okları ve kaydırma çubuğu rayı fareyle
-  kullanılır; klavyeden `PgUp`/`PgDn`, `↑`/`↓`, `Home`/`End` çalışır. Alt bilgi
-  satırında görünen aralık (`Satir 32-62 / 420`) ve toplam satır sayısı yazar.
-- **Dönüş:** `Arama`, `Enter` veya `Backspace` arama penceresini öne getirir;
-  sayfa arka planda açık kalır.
-- **Hata/boş durum:** Sayfa getirilemezse panelde hata mesajı ve `Yenile`
-  ipucu gösterilir. Sayfa metni yoksa `Sayfa metni bulunamadi` yazar.
-- **Sınırlar:** Okuyucu HTML/CSS/JavaScript çalıştırmaz, görsel ve form
-  göstermez; yalnızca `ReadablePageParser` ile ayıklanan okunabilir metni
-  çizer. Sayfa içi bağlantılar takip edilmez. Tam tarayıcı için native
-  NIC/TCP/TLS yığını yol haritasındadır.
+- **Araç çubuğu:** `Arama` arama listesine döner; `<` ve `>` tarayıcı
+  geçmişinde geri/ileri gider; `Yenile` sayfayı önbelleği atlayarak yeniler.
+  Sağda `Gorsel aliniyor %N`, `Internet: hazir | gercek sayfa` veya
+  `Internet: hata` durumu gösterilir.
+- **Görüntü paneli:** `676×394` RGB565 kare, içerik panelinde 2 px kenar
+  boşluğuyla ortalanır. Görünüm, host tarayıcısının aynı boyuttaki görünümüyle
+  birebir aynıdır; sayfa kendi kaydırma çubuğunu gizler, misafir kendi
+  kaydırma çubuğunu çizer.
+- **Gezinme:** Sayfa içindeki bir bağlantıya tıklamak tarayıcıda gerçek fare
+  tıklaması üretir; yeni sayfa yüklenir ve yeni kare gelir. Üstteki `<`/`>`
+  düğmeleri tarayıcı geçmişini kullanır. Form alanları ve JavaScript
+  etkileşimleri tarayıcıda çalışır.
+- **Kaydırma:** Fare tekerleği yerine kaydırma çubuğu, yukarı/aşağı okları,
+  `PgUp`/`PgDn`, `↑`/`↓`, `Home`/`End` ve sayfa içi tıklama kullanılır. Alt
+  bilgi satırında `Kaydirma %N` yazar.
+- **QOI aktarımı:** Kare QOI (RGB, 3 kanal) olarak sıkıştırılır. 220 KB
+  sınırını aşarsa renk paleti sırasıyla 192, 128, 96 ve 64 renge düşürülür;
+  hâlâ sığmazsa metin yedeğine geçilir. 48 KB'lik tipik bir Wikipedia karesi
+  115200 baud COM2'de yaklaşık 4 saniyede aktarılır.
+- **Metin yedeği:** Edge/Chrome yoksa, CDP açılamazsa veya görsel aktarımı
+  başarısız olursa ajan otomatik olarak `ReadablePageParser` metnine düşer ve
+  eski `G/B/Z/X` protokolünü kullanır. Pencere metin satırlarını, kaydırma
+  çubuğunu ve `Yenile` davranışını korur.
+- **Hata/boş durum:** Görsel çözülemezse panelde hata mesajı ve `Yenile`
+  ipucu gösterilir. Metin modunda sayfa metni yoksa `Sayfa metni bulunamadi`
+  yazar.
+- **Sınırlar:** Görüntü yalnızca ekran karesidir; video/ses oynatma, dosya
+  indirme ve yükleme, yeni sekme/sekme değiştirme ve tarayıcı ayarları
+  desteklenmez. Native NIC/TCP/TLS yığını ve kalıcı çerezler bu sürümün
+  kapsamı dışındadır.
+
+### Görsel sayfa protokolü
+
+`V` başlık satırından hemen sonra tam olarak `<len>` bayt QOI verisi gelir;
+araya satır sonu konmaz. Misafir bu baytları `page_bin_remaining` sayacıyla
+tüketir, böylece ikili veri satır protokolünü kaydırmaz.
+
+| Yön | Satır | Anlam |
+|-----|-------|-------|
+| Misafir → host | `P\t<id>\t<URL>\n` | Görsel sayfa isteği |
+| Host → misafir | `V\t<id>\t<676>\t<394>\t<len>\t<başlık>\t<site>\t<URL>\t<scrollY>\t<scrollH>\t<viewH>\t<geri>\t<ileri>\n` | Görsel başlığı; ardından `<len>` bayt QOI |
+| Misafir → host | `S\t<id>\t<delta>\n` | Göreli kaydırma (piksel) |
+| Misafir → host | `J\t<id>\t<konum>\n` | Mutlak kaydırma (piksel) |
+| Misafir → host | `C\t<id>\t<x>\t<y>\n` | Sayfa içine tıklama |
+| Misafir → host | `B\t<id>\n` | Tarayıcı geçmişinde geri |
+| Misafir → host | `F\t<id>\n` | Tarayıcı geçmişinde ileri |
+| Misafir → host | `Y\t<id>\n` | Sayfayı yenile |
+| Host → misafir | `X\t<id>\t<mesaj>\n` | Görsel sayfa/eylem hatası |
+
+Metin yedeği `G/B/Z/X` satırlarını kullanır; `P` isteği görsel yol
+başarısız olduğunda ajan tarafından otomatik olarak metne çevrilir.
 
 ## İnternet arama köprüsü
 
@@ -196,10 +230,12 @@ casrev-os (guest)                    host
 ┌────────────────────┐  COM2 TCP     ┌────────────────────────────┐
 │ ui.c Arama /       │ 127.0.0.1:5568│ scripts/search-agent.py    │
 │ Web Okuyucu        │               │ DuckDuckGo HTML            │
-│ serial2_write    ──┼──────────────►│ Wikipedia API (yedek)      │
-│ serial2_read     ◄─┼───────────────│ ReadablePageParser         │
-└────────────────────┘ Q/R/T/END     └────────────────────────────┘
-                       P/G/B/Z/X
+│ QOI → RGB565       │               │ Wikipedia API (yedek)      │
+│ serial2_write    ──┼──────────────►│ Edge/Chrome headless (CDP) │
+│ serial2_read     ◄─┼───────────────│ QOI kodlayıcı              │
+└────────────────────┘ Q/R/T/END     │ ReadablePageParser (yedek) │
+                       P/V/S/J/C/B/F/Y└────────────────────────────┘
+                       G/B/Z/X (yedek)
 ```
 
 - **QEMU:** `scripts/run.ps1` ajanı gizli pencerede başlatır ve ikinci seri
@@ -214,30 +250,36 @@ casrev-os (guest)                    host
   | Host → misafir | `T\t<başlık>\t<site>\t<URL>\t<özet>\n` | Bir web sonucu |
   | Host → misafir | `END\t<id>\n` | Arama yanıtı bitti |
   | Host → misafir | `E\t<id>\t<mesaj>\n` | Arama hatası |
-  | Misafir → host | `P\t<id>\t<URL>\n` | Sayfa metni isteği |
-  | Host → misafir | `G\t<id>\t<satır>\t<başlık>\t<site>\t<URL>\n` | Sayfa başlığı ve satır sayısı |
-  | Host → misafir | `B\t<id>\t<tür>\t<metin>\n` | Sayfa satırı (0 paragraf, 1 başlık, 2 madde, 3 alıntı, 4 boşluk, 5 not) |
-  | Host → misafir | `Z\t<id>\n` | Sayfa aktarımı bitti |
+  | Misafir → host | `P\t<id>\t<URL>\n` | Görsel sayfa isteği |
+  | Host → misafir | `V\t...\n` + QOI | Görsel kare (ayrıntı yukarıda) |
+  | Misafir → host | `S/J/C/B/F/Y\t<id>...\n` | Kaydırma, tıklama, geçmiş, yenile |
+  | Misafir → host | `P\t<id>\t<URL>\n` | Metin yedeği isteği (aynı komut) |
+  | Host → misafir | `G\t<id>\t<satır>\t<başlık>\t<site>\t<URL>\n` | Metin başlığı ve satır sayısı |
+  | Host → misafir | `B\t<id>\t<tür>\t<metin>\n` | Metin satırı (0 paragraf, 1 başlık, 2 madde, 3 alıntı, 4 boşluk, 5 not) |
+  | Host → misafir | `Z\t<id>\n` | Metin aktarımı bitti |
   | Host → misafir | `X\t<id>\t<mesaj>\n` | Sayfa hatası |
 
 - **Zamanlama:** Arama tuş vuruşları 400 ms debounce edilir; arama yanıtı
   8 saniye içinde gelmezse UI `Internet: hata` durumuna geçer ve yerel
-  sonuçlara döner. Sayfa getirme 8 saniye, misafir sayfa aktarımı 20 saniye
-  ile sınırlıdır. Satırlar akarken UI, UART FIFO'sunu kısa süreliğine
-  kesintisiz boşaltır; böylece 420 satırlık bir sayfa birkaç saniyede
-  tamamlanır.
+  sonuçlara döner. Tarayıcı sayfa yüklemesi 12 saniye, sayfa eylemi 10 saniye,
+  görsel kare aktarımı 30 saniye ile sınırlıdır. QOI baytları akarken UI,
+  UART FIFO'sunu dört tick'lik pencerelerle kesintisiz boşaltır.
 - **Ajan:** DuckDuckGo `html.duckduckgo.com/html/?q=...` sayfasını ayrıştırır;
   yeterli sonuç yoksa Türkçe ve İngilizce Wikipedia API'sine düşer. Hesap,
   API anahtarı ve çerez kullanmaz. Başlık 76, site 36, URL 156, özet 136
-  karaktere sınırlanır; sekmeler ve kontrol karakterleri temizlenir. Sayfa
-  isteğinde HTML `ReadablePageParser` ile başlık, paragraf, başlık, madde ve
-  alıntılara ayrılır; 640 KB indirme, 8 saniye getirme, 420 satır ve satır
-  başına 80 karakter sınırı uygulanır.
+  karaktere sınırlanır; sekmeler ve kontrol karakterleri temizlenir. Görsel
+  sayfa için Edge, yoksa Chrome `--headless=new` ve geçici bir profil ile
+  başlatılır; CDP WebSocket'i el sıkışması `Origin` başlığıyla yapılır.
+  Tarayıcı yoksa veya CDP açılamazsa HTML `ReadablePageParser` ile başlık,
+  paragraf, başlık, madde ve alıntılara ayrılır; 640 KB indirme, 8 saniye
+  getirme, 420 satır ve satır başına 80 karakter sınırı uygulanır.
 - **Gizlilik:** Sorgu ve sayfa isteği yalnızca host üzerinden hedef siteye
-  gider; COM2 bağlantısı `127.0.0.1` ile sınırlıdır. Ajan kalıcı kimlik veya
-  arama geçmişi tutmaz.
-- **Sınırlar:** Web Okuyucu metin tabanlıdır; CSS düzeni, JavaScript, görsel,
-  form ve sayfa içi bağlantılar gösterilmez. Tam sayfa tarayıcı, native
+  gider; COM2 bağlantısı `127.0.0.1` ile sınırlıdır. Görsel tarayıcı geçici
+  profilde çalışır, çıkışta profil silinir; kalıcı çerez, hesap veya arama
+  geçmişi tutulmaz. Sayfalar host IP'si ve normal tarayıcı User-Agent'ı ile
+  istenir.
+- **Sınırlar:** Web Okuyucu gerçek sayfa karesini gösterir; video/ses, dosya
+  indirme/yükleme, yeni sekme ve tarayıcı ayarları desteklenmez. Native
   NIC/TCP/TLS yığını ve kalıcı çerezler bu sürümün kapsamı dışındadır.
 - **Kapalı mod:** `scripts/run.ps1 -NoInternet` ajanı ve COM2'yi devre dışı
   bırakır; uygulama yalnızca yerel aramayla çalışır.
@@ -275,10 +317,12 @@ casrev-os (guest)                    host
 - `scripts/test-search-online.ps1`: Python ajanını başlatır, QEMU'ya COM2
   ekler, gerçek `Linux` sorgusunu DuckDuckGo üzerinden çalıştırır; web
   satırlarını, `WEB SONUCU` detay kartını ve `Geri` düğmesini doğrular.
-  `Sayfayı Aç` ile Web Okuyucunun sayfa metnini eksiksiz aldığını,
-  kaydırıldığını ve `Arama` ile listeye dönüldüğünü ekran görüntüleriyle
-  kaydeder. Ardından `ayar` sorgusuyla üç yerel + iki web satırını aynı listede
-  gösterip birleşik görünümü ve web detay kartını kaydeder.
+  `Sayfayı Aç` ile `676×394` QOI karesinin geldiğini, sayfa görselinin renk
+  zenginliğini, sayfa içi tıklamayla yeni sayfa açıldığını, tarayıcı
+  geçmişinde geri dönüldüğünü ve `PgDn` sonrası karenin değiştiğini ekran
+  görüntüleriyle kaydeder. Ardından `ayar` sorgusuyla üç yerel + iki web
+  satırını aynı listede gösterip birleşik görünümü ve web detay kartını
+  kaydeder.
 - Ekran görüntüleri `build/settings-*.png`, `build/search-*.png`,
   `build/search-online-*.png`, `build/gui.png` ve belge görselleri
   `docs/stage10.png`, `docs/arama.png`, `docs/arama-online.png` ile

@@ -27,6 +27,8 @@ $shots = @(
     'search-online-back',
     'search-online-page-loading',
     'search-online-page',
+    'search-online-page-click',
+    'search-online-page-history-back',
     'search-online-page-scroll',
     'search-online-page-back',
     'search-online-mixed',
@@ -64,6 +66,9 @@ $client    = $null
 $failure   = $null
 $webOk     = $false
 $pageOk    = $false
+$clickOk   = $false
+$historyOk = $false
+$scrollOk  = $false
 $mixedOk   = $false
 
 try {
@@ -210,7 +215,7 @@ try {
     Start-Sleep -Milliseconds 400
     Screenshot 'search-online-back'
 
-    # Ayni web sonucunu tekrar ac ve sayfa metnini yukle.
+    # Ayni web sonucunu tekrar ac ve gercek tarayici sayfasini yukle.
     Click-At 300 200
     Start-Sleep -Milliseconds 400
 
@@ -219,26 +224,86 @@ try {
     Start-Sleep -Milliseconds 250
     Screenshot 'search-online-page-loading'
 
-    $pageDeadline = (Get-Date).AddSeconds(30)
+    # CSS/JS/gorseller Edge tarafinda render edilir; misafire QOI karesi gelir.
+    $pageDeadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $pageDeadline) {
         if (Test-Path $agentLog) {
             $agentText = Get-Content $agentLog -Raw
-            if ($agentText -match 'sayfa \d+: [1-9]\d* satir gonderildi') {
+            if ($agentText -match 'sayfa \d+: gorsel 676x394, [1-9]\d* bayt') {
                 $pageOk = $true
                 break
             }
-            if ($agentText -match 'sayfa \d+ basarisiz') { break }
+            if ($agentText -match 'gorsel sayfa \d+ basarisiz|metin yedegi') { break }
         }
         Start-Sleep -Milliseconds 250
     }
 
-    # Ajan satirlari TCP'ye birakir; misafir UART'tan ~2 sn'de okur.
-    Start-Sleep -Milliseconds 4000
+    # Ajan QOI karesini TCP'ye birakir; misafir UART'tan cozer.
+    Start-Sleep -Milliseconds 5000
     Screenshot 'search-online-page'
 
-    # PgDn ile sayfa metnini kaydir.
+    # Sayfa icindeki Vikipedi logosuna tikla: yeni sayfa acilmali ve
+    # tarayici gecmisi "geri"yi etkinlestirmeli.
+    $visualCount = 0
+    if (Test-Path $agentLog) {
+        $visualCount = ([regex]::Matches((Get-Content $agentLog -Raw),
+            'sayfa \d+: gorsel 676x394')).Count
+    }
+    Click-At 212 152
+    $clickDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $clickDeadline) {
+        if (Test-Path $agentLog) {
+            $agentText = Get-Content $agentLog -Raw
+            if (($agentText -match 'gorsel eylem \d+: C 150 30') -and
+                ([regex]::Matches($agentText, 'sayfa \d+: gorsel 676x394').Count -gt $visualCount) -and
+                ($agentText -match 'sayfa \d+: gorsel 676x394, [1-9]\d* bayt, kaydirma \d+/\d+, geri 1')) {
+                $clickOk = $true
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    Start-Sleep -Milliseconds 4000
+    Screenshot 'search-online-page-click'
+
+    # Ust arac cubugundaki "<" ile tarayici gecmisinde geri don.
+    Click-At 139 99
+    $historyDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $historyDeadline) {
+        if (Test-Path $agentLog) {
+            $agentText = Get-Content $agentLog -Raw
+            if (($agentText -match 'gorsel eylem \d+: B') -and
+                ($agentText -match 'sayfa \d+: gorsel 676x394, [1-9]\d* bayt, kaydirma \d+/\d+, geri \d, ileri 1')) {
+                $historyOk = $true
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    Start-Sleep -Milliseconds 4000
+    Screenshot 'search-online-page-history-back'
+
+    # PgDn ile gercek sayfa goruntusunu kaydir; yeni kare gelmeli.
+    $visualCount = 0
+    if (Test-Path $agentLog) {
+        $visualCount = ([regex]::Matches((Get-Content $agentLog -Raw),
+            'sayfa \d+: gorsel 676x394')).Count
+    }
     Send-Key 'pgdn'
-    Start-Sleep -Milliseconds 500
+    $scrollDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $scrollDeadline) {
+        if (Test-Path $agentLog) {
+            $agentText = Get-Content $agentLog -Raw
+            if (($agentText -match 'gorsel eylem \d+: S \d+') -and
+                ([regex]::Matches($agentText, 'sayfa \d+: gorsel 676x394').Count -gt $visualCount) -and
+                ($agentText -match 'sayfa \d+: gorsel 676x394, [1-9]\d* bayt, kaydirma [1-9]\d*/')) {
+                $scrollOk = $true
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    Start-Sleep -Milliseconds 4000
     Screenshot 'search-online-page-scroll'
 
     # Web okuyucudan arama listesine don.
@@ -299,6 +364,33 @@ foreach ($name in $shots) {
     }
 }
 
+# Sayfa karesinin gercekten zengin (fotograf/CSS) oldugunu ve kaydirmanin
+# goruntuyu degistirdigini dogrula. Metin okuyucuda renk sayisi cok dusuktur.
+$pageColors = 0
+$scrollDiff = 0.0
+$pagePng   = Join-Path $root 'build\search-online-page.png'
+$scrollPng = Join-Path $root 'build\search-online-page-scroll.png'
+if ((Test-Path $pagePng) -and (Test-Path $scrollPng)) {
+    $probe = @'
+import sys
+from PIL import Image, ImageChops
+box = (62, 122, 738, 516)
+a = Image.open(sys.argv[1]).convert('RGB').crop(box)
+b = Image.open(sys.argv[2]).convert('RGB').crop(box)
+colors = len(a.getcolors(maxcolors=1000000) or [])
+diff = ImageChops.difference(a, b)
+total = sum(sum(p) for p in diff.getdata())
+print(colors, round(total / (a.width * a.height * 3), 3))
+'@
+    $probeOut = & $python.Source -c $probe $pagePng $scrollPng
+    if ($probeOut) {
+        $parts = ($probeOut -split '\s+')
+        $pageColors = [int]$parts[0]
+        $scrollDiff = [double]$parts[1]
+    }
+    Write-Host "Sayfa gorseli: $pageColors renk, kaydirma farki $scrollDiff"
+}
+
 if (Test-Path $agentLog) {
     Write-Host '--- ARAMA KOPRUSU (son 8 satir) ---'
     Get-Content $agentLog -Tail 8 | Write-Host
@@ -310,10 +402,26 @@ if (-not $webOk) {
     throw 'Internet arama sonucu alinamadi. Ajan ve ag baglantisini kontrol edin.'
 }
 if (-not $pageOk) {
-    throw 'Sayfa metni alinamadi. Ajan ve sayfa baglantisini kontrol edin.'
+    throw 'Gercek sayfa goruntusu alinamadi. Ajan, tarayici ve QOI aktarimini kontrol edin.'
+}
+if (-not $clickOk) {
+    throw 'Sayfa ici baglanti tiklamasi yeni sayfa acmadi.'
+}
+if (-not $historyOk) {
+    throw 'Tarayici gecmisi geri eylemi dogrulanamadi.'
+}
+if (-not $scrollOk) {
+    throw 'Sayfa kaydirma eylemi yeni goruntu uretmedi.'
+}
+if ($pageColors -lt 250) {
+    throw "Sayfa gorseli zengin degil ($pageColors renk); CSS/gorsel render edilmemis olabilir."
+}
+if ($scrollDiff -lt 0.5) {
+    throw "Kaydirma sonrasi goruntu degismedi (fark $scrollDiff)."
 }
 if (-not $mixedOk) {
     throw 'Yerel + internet birlesik sonucu alinamadi.'
 }
 
-Write-Host 'Internet arama testi basarili: web sonucu, detay karti, sayfa metni ve birlesik liste dogrulandi.'
+Write-Host 'Internet arama testi basarili: web sonucu, detay karti, gercek sayfa goruntusu,'
+Write-Host 'tikla/geri/kaydir ve birlesik liste dogrulandi.'

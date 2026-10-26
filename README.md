@@ -14,7 +14,7 @@ Her aşama çalışır durumda bırakılır: derle, QEMU'da aç, sonucu gör.
 
 ![Arama: yerel + internet sonuçları](docs/arama-online.png)
 
-![Web Okuyucu: sayfa metni](docs/arama-okuyucu.png)
+![Web Okuyucu: metin yedeği](docs/arama-okuyucu.png)
 
 ## Hızlı başlangıç
 
@@ -76,9 +76,14 @@ komutu (`help`) sonuçlarını açıp ekran görüntüleriyle kaydeder
 (`build/search-*.png`). `test-search-online.ps1` Python ajanını başlatır,
 QEMU'ya COM2 olarak bağlar, `Linux` sorgusunu DuckDuckGo üzerinden arar ve
 web sonucu ile `WEB SONUCU` detay kartını doğrular; `Sayfayı Aç` ile gelen
-sayfa metnini, kaydırmayı ve arama listesine dönüşü ekran görüntüleriyle
-kaydeder. Ardından `ayar` sorgusuyla üç yerel + iki web satırını aynı listede
-gösterip birleşik görünümü `build/search-online-*.png` görüntüleriyle kaydeder.
+`676×394` QOI karesini, sayfa görselinin renk zenginliğini, sayfa içi
+tıklamayla yeni sayfa açıldığını, tarayıcı geçmişinde geri dönüldüğünü ve
+`PgDn` sonrası karenin değiştiğini ekran görüntüleriyle kaydeder. Ardından
+`ayar` sorgusuyla üç yerel + iki web satırını aynı listede gösterip birleşik
+görünümü `build/search-online-*.png` görüntüleriyle kaydeder. Test, host'ta
+çalışan bir Edge/Chrome ve sağlıklı bir Windows tarayıcı ortamı gerektirir;
+tarayıcı açılamazsa ajan metin yedeğine geçer ve görsel doğrulamalar başarısız
+olur.
 
 ### İnternet araması
 
@@ -87,32 +92,40 @@ pencerede başlatır ve QEMU'ya `127.0.0.1:5568` üzerinden ikinci seri portu
 (COM2) ekler. Arama penceresine örneğin `Linux` yazdığınızda yerel sonuçların
 altında mavi `W` ikonlu web satırları görünür; birine tıklamak başlık, site,
 URL ve özet içeren `WEB SONUCU` kartını açar. `Sayfayı Aç` düğmesi (veya detay
-kartında `Enter`) sayfayı host ajanına indirtir ve okunabilir metni `Web
-Okuyucu` penceresinde gösterir.
+kartında `Enter`) sayfayı host ajanındaki Edge/Chrome ile render eder ve gerçek
+sayfa görüntüsünü `Web Okuyucu` penceresinde gösterir; tarayıcı yoksa otomatik
+olarak okunabilir metne düşer.
 
 - Python 3 yoksa veya internet erişimi yoksa yerel arama çalışmaya devam eder.
 - `-NoInternet` anahtarı ajanı ve COM2'yi tamamen kapatır.
 - Ajan DuckDuckGo HTML arayüzünü, yedek olarak Wikipedia API'sini kullanır;
-  hesap, API anahtarı ve çerez istemez.
+  hesap, API anahtarı ve kalıcı çerez istemez.
 - Ajan günlükleri `build/search-agent.log` ve
   `build/search-agent.err.log` dosyalarındadır.
-- **Web Okuyucu:** HTML/CSS/JavaScript çalıştırmaz; `ReadablePageParser`
-  sayfadan başlık, paragraf, başlık, madde ve alıntı metinlerini ayıklar.
-  İçerik en fazla 420 satır ve satır başına 80 karakterdir; indirme sınırı
-  640 KB, host zaman aşımı 8 saniye, misafir zaman aşımı 20 saniyedir.
+- **Web Okuyucu:** Edge veya Chrome `--headless=new` ve geçici profille CDP
+  üzerinden `676×394` görünümde çalışır; HTML/CSS/JavaScript ve görseller
+  gerçek tarayıcıda render edilir, kare QOI olarak COM2'den misafire aktarılır.
+  Sayfa içi bağlantılar tıklanabilir; `<`/`>` tarayıcı geçmişinde gezinir,
+  `Yenile` sayfayı yeniler. Kare 220 KB sınırını aşarsa renk paleti düşürülür;
+  yine sığmazsa metin yedeğine geçilir.
+- **Metin yedeği:** Tarayıcı yoksa, CDP açılamazsa veya görsel aktarımı
+  başarısız olursa `ReadablePageParser` devreye girer; başlık, paragraf,
+  başlık, madde ve alıntı satırları gösterilir. İçerik en fazla 420 satır ve
+  satır başına 80 karakterdir; indirme sınırı 640 KB, host zaman aşımı
+  8 saniye, misafir metin zaman aşımı 20 saniyedir.
 - **Okuyucu kontrolleri:** `Arama` listeye döner, `Yenile` sayfayı tekrar
-  indirir; kaydırma çubuğu, `PgUp`/`PgDn`, ok tuşları ve `Home`/`End` ile
+  yükler; kaydırma çubuğu, `PgUp`/`PgDn`, ok tuşları ve `Home`/`End` ile
   gezinilir. `Enter` veya `Backspace` arama listesine döner.
-- Görseller, CSS düzeni, formlar, JavaScript ve sayfa içi gezinme gösterilmez;
-  bu sürüm metin odaklı bir okuyucudur. Native NIC/TCP/TLS yığını ve tam sayfa
-  tarayıcı yol haritasındadır.
+- **Sınırlar:** Video/ses oynatma, dosya indirme/yükleme, yeni sekme ve
+  tarayıcı ayarları desteklenmez. Native NIC/TCP/TLS yığını ve kalıcı çerezler
+  yol haritasındadır.
 
 ## Modern Masaüstü ve Uygulamalar (v0.9, 16-bit)
 
 - **VESA Mode 0x114:** 800×600, 65.536 renk (RGB565), 16-bit doğrusal (LFB) framebuffer; eski palet renkleri uyumluluk için RGB565'e eşlenir.
 - **16-bit görsel katman:** Tam renkli gradyan duvar kağıtları, yumuşak pencere gölgeleri, yarı saydam görev çubuğu/Başlat menüsü ve gradyan başlık çubukları.
 - **Etkileşim cilâsı:** Masaüstü simgeleri, Başlat menüsü öğeleri ve pencere düğmeleri için hover vurguları.
-- **Dokuz yerleşik uygulama ve Web Okuyucu:** Terminal, Dosya Gezgini, Not Defteri, Paint, Mayın Tarlası, Hesap Makinesi, Sistem Bilgisi, Arama, Ayarlar ve arama sonuçlarından açılan metin tabanlı Web Okuyucu.
+- **Dokuz yerleşik uygulama ve Web Okuyucu:** Terminal, Dosya Gezgini, Not Defteri, Paint, Mayın Tarlası, Hesap Makinesi, Sistem Bilgisi, Arama, Ayarlar ve arama sonuçlarından açılan gerçek sayfa görüntüsü gösteren Web Okuyucu (tarayıcı yoksa metin yedeği).
 - **Pencere yönetimi:**
   - Pencereler başlık çubuğundan sürüklenebilir.
   - `[-]` küçültür, `[ ]` büyütür/geri yükler, `[x]` kapatır.
@@ -127,7 +140,7 @@ Okuyucu` penceresinde gösterir.
   - Açık pencereler için dinamik genişlikte sekmeler; tıklayınca küçült/geri aç.
   - Sistem tepsisi: canlı PMM RAM kullanımı (`RAM: X/31M`), fare koordinatları ve RTC saati.
 - **Başlat menüsü:** Yarı saydam koyu panel, hover vurgulu dokuz uygulama, yeniden başlat ve kapat.
-- **Arama (yerel + internet):** Google görünümlü arama penceresi; RamFS dosyalarını, uygulamaları ve kabuk komutlarını tarar. İnternet varsa DuckDuckGo sonuçları aynı listede web satırları olarak görünür; web sonucunun `Sayfayı Aç` düğmesi okunabilir sayfa metnini Web Okuyucuda açar. Bağlantı yoksa yerel arama çalışmaya devam eder.
+- **Arama (yerel + internet):** Google görünümlü arama penceresi; RamFS dosyalarını, uygulamaları ve kabuk komutlarını tarar. İnternet varsa DuckDuckGo sonuçları aynı listede web satırları olarak görünür; web sonucunun `Sayfayı Aç` düğmesi gerçek sayfa görüntüsünü Web Okuyucuda açar. Host'ta Edge/Chrome yoksa veya CDP başlatılamazsa okuyucu otomatik olarak sayfa metnine düşer. Bağlantı yoksa yerel arama çalışmaya devam eder.
 - **Dört duvar kağıdı:** 16-bit gradyanlı yıldızlı gece silueti, okyanus, gün batımı ve sade klasik tema.
 - **Sanal Dosya Sistemi (RamFS):** Bellek içi klasör/dosya hiyerarşisi; Dosya Gezgini ve Not Defteri ile düzenlenebilir.
 
@@ -143,7 +156,7 @@ Okuyucu` penceresinde gösterir.
 5. **Mayın Tarlası:** 9×9 ızgara, 10 mayın, sayaç, gülen yüz sıfırlama, sol tıkla açma, sağ tıkla bayrak.
 6. **Hesap Makinesi:** Tıklanabilir butonlar ve klavye desteği, LCD ekran.
 7. **Sistem Bilgisi:** CPU tick, çalışma süresi, donanım durumları ve canlı RAM doluluk çubuğu.
-8. **Arama (Yerel + İnternet):** Google'a benzeyen sade arayüz; yazarken RamFS dosya adı/yolu/içeriği, uygulamalar ve kabuk komutları arasında anında arama. İnternet köprüsü açıksa DuckDuckGo'dan en fazla iki web sonucu aynı listeye eklenir. Dosya sonucu Not Defterinde, uygulama sonucu ilgili pencerede, komut sonucu Terminalde açılır; web sonucu başlık, site, URL ve özet içeren `WEB SONUCU` kartını gösterir. `Sayfayı Aç` ile sayfa metni `Web Okuyucu` penceresinde okunur; bağlantı yoksa yerel arama bozulmadan çalışır.
+8. **Arama (Yerel + İnternet):** Google'a benzeyen sade arayüz; yazarken RamFS dosya adı/yolu/içeriği, uygulamalar ve kabuk komutları arasında anında arama. İnternet köprüsü açıksa DuckDuckGo'dan en fazla iki web sonucu aynı listeye eklenir. Dosya sonucu Not Defterinde, uygulama sonucu ilgili pencerede, komut sonucu Terminalde açılır; web sonucu başlık, site, URL ve özet içeren `WEB SONUCU` kartını gösterir. `Sayfayı Aç` ile sayfa, Edge/Chrome tarafından CSS/JavaScript/görsellerle render edilir ve `Web Okuyucu` penceresinde gerçek görüntü olarak açılır; tarayıcı yoksa okunabilir metne düşer. Bağlantı yoksa yerel arama bozulmadan çalışır.
 9. **Ayarlar:** Duvar kağıdı seçimi, klavye bilgisi, kısayollar ve canlı sistem durumu.
 
 ## Türkçe-Q klavye
@@ -215,6 +228,7 @@ Windows-1254 kodlarıyla üretilir ve 8×8 özel gliflerle çizilir.
 - [x] **Aşama 8.5 (v0.9)** — Tam Türkçe-Q klavye, Ayarlar uygulaması, dört duvar kağıdı, 16-bit RGB565 görsel paket, büyütme/geri yükleme
 - [x] **Aşama 8.6** — Google görünümlü yerel Arama: RamFS dosyaları, uygulamalar ve kabuk komutları arasında çevrimdışı arama
 - [x] **Aşama 8.7** — COM2 host köprüsüyle anonim internet araması: DuckDuckGo + Wikipedia, birleşik yerel/web sonuç listesi, web detay kartı ve metin tabanlı Web Okuyucu
+- [x] **Aşama 8.8** — Web Okuyucu gerçek sayfa görüntüsü: Edge/Chrome CDP ile CSS/JavaScript/görsel render, QOI aktarımı, sayfa içi tıklama, tarayıcı geçmişi, kaydırma ve otomatik metin yedeği
 - [ ] **Aşama 9** — Kalıcı dosya sistemi (ATA/FAT12), dosyaların yeniden başlatmada korunması
 - [ ] **Aşama 10** — Süreçler, görev değiştirme, sistem çağrıları
 - [ ] **Aşama 11** — Daha fazla uygulama, kararlılık ve performans çalışmaları
@@ -228,7 +242,7 @@ casrev-os/
 │   ├── stage10.png          # v0.9 16-bit masaüstü ekran görüntüsü
 │   ├── arama.png            # Arama uygulaması ekran görüntüsü
 │   ├── arama-online.png     # internet sonuçları ekran görüntüsü
-│   └── arama-okuyucu.png    # Web Okuyucu sayfa metni ekran görüntüsü
+│   └── arama-okuyucu.png    # Web Okuyucu metin yedeği ekran görüntüsü
 ├── src/
 │   ├── boot/
 │   │   ├── boot.asm         # boot sector
@@ -335,16 +349,23 @@ casrev-os/
   sınırlar. Yerel sonuçlar korunur; internet yoksa/gecikirse yalnızca yerel
   liste gösterilir. Web sonucuna tıklamak başlık, site, URL ve özetten oluşan
   `WEB SONUCU` kartını açar; `Sayfayı Aç` aynı COM2 hattından `P\t<id>\t<URL>`
-  isteği gönderir ve host'un ayıkladığı okunabilir metni `Web Okuyucu`
-  penceresinde gösterir.
-- **Web Okuyucu:** Host, sayfayı `G` (başlık/site/satır sayısı), `B`
-  (paragraf/başlık/madde/alıntı satırı) ve `Z` (bitiş) iletileriyle yollar.
-  İçerik 420 satır, satır başına 80 karakter, 640 KB indirme ve 8 saniye
-  getirme ile sınırlıdır; misafir 20 saniye yanıt beklemezse hata durumuna
-  geçer. Okuyucu HTML/CSS/JavaScript çalıştırmaz, görsel göstermez; kaydırma
-  çubuğu, `PgUp`/`PgDn`, ok tuşları ve `Home`/`End` ile metin içinde gezinilir.
-- **Gizlilik:** Ajan hesap, API anahtarı ve çerez kullanmaz; yalnızca sorguyu
-  DuckDuckGo/Wikipedia'ya iletir. COM2 bağlantısı `127.0.0.1` üzerindedir.
+  isteği gönderir ve host'un döndürdüğü gerçek sayfa karesini `Web Okuyucu`
+  penceresinde gösterir. Tarayıcı yoksa aynı istek otomatik olarak metin
+  yedeğine düşer.
+- **Web Okuyucu:** Host, Edge veya Chrome'u `--headless=new` ve geçici profille
+  CDP üzerinden açar; sayfayı `676×394` görünümde render eder ve QOI karesini
+  `V` başlığı + ikili gövde olarak yollar. Misafir QOI'yi RGB565'e çözer;
+  böylece CSS düzeni, JavaScript ve görseller gerçek tarayıcıdaki gibi görünür.
+  Sayfa içi tıklama `C`, kaydırma `S/J`, tarayıcı geçmişi `B/F`, yenileme `Y`
+  iletileriyle tarayıcıya aktarılır. Kare 220 KB sınırını aşarsa palet sırasıyla
+  192/128/96/64 renge düşürülür; hâlâ sığmazsa metin yedeğine geçilir. Tarayıcı
+  yoksa, CDP açılamazsa veya görsel aktarımı başarısız olursa ajan otomatik
+  olarak `G` (başlık), `B` (satır) ve `Z` (bitiş) metin protokolüne düşer;
+  420 satır, satır başına 80 karakter, 640 KB indirme ve 8 saniye getirme
+  sınırları korunur. Misafir görsel kareyi 30 saniye, metni 20 saniye bekler.
+- **Gizlilik:** Ajan hesap, API anahtarı ve kalıcı çerez kullanmaz; yalnızca
+  sorguyu DuckDuckGo/Wikipedia'ya iletir. Görsel tarayıcı geçici profilde
+  çalışır, çıkışta profil silinir. COM2 bağlantısı `127.0.0.1` üzerindedir.
 - Test çıktısı hem grafik terminale hem COM1'e yazılır; test betikleri QEMU
   `sendkey`, `mouse_move` ve `mouse_button` ile gerçek girişleri gönderip
   sonucu seri porttan ve ekran görüntülerinden doğrular.
