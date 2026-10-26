@@ -5,6 +5,8 @@ Sıfırdan, adım adım geliştirilen küçük bir x86 işletim sistemi.
 Her aşama çalışır durumda bırakılır: derle, QEMU'da aç, sonucu gör.
 
 > Proje konumu: `C:\Users\smmav\OneDrive\Desktop\casrev-os`
+>
+> GitHub: <https://github.com/Volkanas/casrev-os>
 
 ![casrev-os v0.9 16-bit masaüstü](docs/stage10.png)
 
